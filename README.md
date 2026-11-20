@@ -28,3 +28,10 @@ cd android && ./gradlew assembleDebug
 ## Mengubah isi aplikasi
 Edit `index.html` di root, lalu `npm run sync`. Folder `www/` dibuat otomatis (jangan diedit).
 Ganti `appId` / nama di `capacitor.config.json` bila perlu (ID paket lama dan baru dianggap aplikasi berbeda).
+
+## Database & jadwal
+- Data presensi (lokasi, jadwal, pengaturan, log, foto) ada di project Supabase `nrwexyezcbmsokelgkmp`; e-Rapor/PDP hanya dibaca (login + data pegawai).
+- Setup: jalankan `setup.sql` di project presensi, deploy `index.ts` sebagai Edge Function `presensi-api` (Verify JWT: OFF, secret `RAPOR_URL` dan `RAPOR_ANON_KEY`).
+- Menu admin: **Input jadwal** (xlsx reguler / tes / piket + template), **Cek jadwal**, **Pengaturan** (jam staf, libur, force majeure, guru tugas tambahan staf, tanggal acuan tes / pasca tes / piket).
+- Urutan jadwal yang berlaku per tanggal: libur / force majeure (tidak ada jadwal, presensi ditolak) → mode acuan (tes, pasca tes, piket, atau reguler) → jam staf bila berlaku. Jam staf berlaku Senin–Sabtu.
+- Unggah dan unduh template Excel paling nyaman dari browser komputer.
