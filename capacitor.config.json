@@ -1,0 +1,14 @@
+{
+  "appId": "com.presensi.sekolah",
+  "appName": "Presensi",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SystemBars": {
+      "insetsHandling": "native",
+      "initialViewportFitValueHint": "auto"
+    }
+  }
+}

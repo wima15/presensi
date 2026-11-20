@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Presensi Guru & Karyawan</title>
+<script src="vendor/supabase.js"></script>
+<style>
+:root{--ink:#14302c;--paper:#f6f7f4;--card:#fff;--line:#d9dfd9;--main:#0f6b5c;--warn:#b4570a;--bad:#a32424;--ok:#17743a;--mut:#5d6f6a;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--ink:#e8efec;--paper:#0f1a18;--card:#16241f;--line:#2b3d37;--main:#3fb59f;--warn:#e19a4b;--bad:#ef7b7b;--ok:#5bc788;--mut:#9ab0a9;color-scheme:dark}}
+*{box-sizing:border-box}
+html{overscroll-behavior-y:contain}
+#ptr{position:fixed;left:0;right:0;top:0;display:flex;justify-content:center;pointer-events:none;z-index:9;transform:translateY(-60px);opacity:0}
+#ptr span{margin-top:calc(env(safe-area-inset-top) + 8px);background:var(--card);color:var(--main);border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-size:.85rem;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+#ptr.spin i{display:inline-block;width:.8em;height:.8em;margin-right:6px;border:2px solid var(--main);border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}
+@keyframes sp{to{transform:rotate(360deg)}}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+main{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:1.4rem;margin:0}h2{font-size:1.1rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+label{display:block;font-size:.85rem;color:var(--mut);margin:10px 0 3px}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--ink);font:inherit}
+button{padding:10px 16px;border:0;border-radius:8px;background:var(--main);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+button.alt{background:transparent;color:var(--main);border:1px solid var(--main)}
+button:disabled{opacity:.5}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--warn);outline-offset:2px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row>*{flex:1}
+.tabs{display:flex;gap:6px;overflow-x:auto;margin:12px 0}.tabs button{flex:none}
+.clock{font-size:2.6rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+.mut{color:var(--mut);font-size:.9rem}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+video,canvas,img.prev{width:100%;border-radius:10px;background:#000;aspect-ratio:3/4;object-fit:cover}
+.wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+#msg{position:sticky;top:8px;z-index:5}.m{padding:10px 14px;border-radius:8px;margin-bottom:8px;background:var(--ink);color:var(--paper)}
+</style>
+</head>
+<body>
+<div id="ptr"><span></span></div>
+<main>
+<div id="msg" role="status"></div>
+<div id="app"></div>
+</main>
+<script>
+// Memakai project e-Rapor/PDP: login & data pegawai (tabel profiles) langsung dari sana.
+const SUPABASE_URL = "https://iejpwxmcqwecejsrezry.supabase.co";
+const SUPABASE_KEY = "sb_publishable_dZfvfiSsA-JAndPn172VSg_sq_zRWqS";
+// Sesi login disimpan permanen (sekali masuk, tetap masuk sampai menekan "Keluar").
+// Di aplikasi Android dipakai penyimpanan native (Preferences) yang lebih awet daripada localStorage WebView.
+const Pref = window.Capacitor?.Plugins?.Preferences;
+const authOpts = { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false };
+if (Pref) authOpts.storage = {
+  getItem: async k => (await Pref.get({ key: k })).value,
+  setItem: (k, v) => Pref.set({ key: k, value: v }),
+  removeItem: k => Pref.remove({ key: k }),
+};
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: authOpts });
+// Foto disimpan di project Supabase TERPISAH. Browser tidak memegang kunci project itu:
+// foto dikirim lewat Edge Function yang memverifikasi sesi login e-Rapor.
+const FOTO_FN = "https://nrwexyezcbmsokelgkmp.supabase.co/functions/v1/foto-presensi";
+async function foto(body) {
+  const { data } = await sb.auth.getSession();
+  const r = await fetch(FOTO_FN, { method: "POST", headers: { "Content-Type": "application/json", "x-rapor-token": data.session?.access_token || "" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "Server foto menolak (" + r.status + ")");
+  return j;
+}
+const $ = s => document.querySelector(s);
+const HARI = ["", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"];
+let me = null, cfg = null, stream = null, tab = "presensi", timer = null, watchId = null, depth = 0, keluarManual = false;
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function toast(t, bad) { const d = document.createElement("div"); d.className = "m"; if (bad) d.style.background = "var(--bad)"; d.textContent = t; $("#msg").append(d); setTimeout(() => d.remove(), 5000); }
+const wib = d => new Date(d.toLocaleString("en-US", { timeZone: "Asia/Jakarta" }));
+const ymd = d => { const w = wib(d); return `${w.getFullYear()}-${String(w.getMonth() + 1).padStart(2, "0")}-${String(w.getDate()).padStart(2, "0")}`; };
+const hhmm = d => wib(d).toTimeString().slice(0, 8);
+const hariKe = d => wib(d).getDay() || 7;
+function jarak(a, b, c, d) { const r = x => x * Math.PI / 180, h = Math.sin(r(c - a) / 2) ** 2 + Math.cos(r(a)) * Math.cos(r(c)) * Math.sin(r(d - b) / 2) ** 2; return Math.round(12742000 * Math.asin(Math.sqrt(h))); }
+function csv(text) {
+  const lines = text.replace(/^\uFEFF/, "").trim().split(/\r?\n/); const sep = lines[0].includes(";") ? ";" : ",";
+  const head = lines[0].split(sep).map(h => h.trim().toLowerCase());
+  return lines.slice(1).filter(l => l.trim()).map(l => { const v = l.split(sep); return Object.fromEntries(head.map((h, i) => [h, (v[i] || "").trim().replace(/^"|"$/g, "")])); });
+}
+const readFile = f => new Promise(r => { const x = new FileReader(); x.onload = () => r(x.result); x.readAsText(f); });
+
+/* ---------- Login ---------- */
+async function init() {
+  history.replaceState({ d: 0, t: "presensi" }, "");
+  const { data } = await sb.auth.getSession();
+  data.session ? await masuk(data.session.user) : loginView();
+}
+// Sesi hanya berakhir bila pengguna menekan Keluar (atau server menolak refresh token: akun dihapus / sandi diganti).
+sb.auth.onAuthStateChange(ev => {
+  if (ev === "SIGNED_OUT" && !keluarManual && me) { stop(); me = null; toast("Sesi berakhir, silakan masuk lagi.", true); loginView(); }
+});
+function loginView() {
+  $("#app").innerHTML = `<div class="card"><h1>Presensi Sekolah</h1><p class="mut">Masuk dengan email dan kata sandi akun e-Rapor/PDP.</p>
+  <label for="em">Email</label><input id="em" type="email" autocomplete="username">
+  <label for="pw">Kata sandi</label><input id="pw" type="password" autocomplete="current-password">
+  <p><button id="go">Masuk</button></p></div>`;
+  $("#go").onclick = async () => {
+    const { data, error } = await sb.auth.signInWithPassword({ email: $("#em").value.trim(), password: $("#pw").value });
+    if (error) return toast(/invalid login/i.test(error.message) ? "Email atau kata sandi salah, atau akun belum dibuat di Authentication > Users." : /confirm/i.test(error.message) ? "Email belum dikonfirmasi. Konfirmasi di Authentication > Users." : "Gagal masuk: " + error.message, true);
+    masuk(data.user);
+  };
+}
+// Tampil saat data gagal dimuat (mis. tidak ada internet). Pengguna TETAP login, cukup coba lagi.
+function gagalView(pesan) {
+  $("#app").innerHTML = `<div class="card"><h1>Tidak bisa memuat data</h1><p class="bad">${esc(pesan)}</p><p class="mut">Anda tetap masuk. Periksa koneksi internet lalu coba lagi.</p>
+  <div class="row"><button id="ulang">Coba lagi</button><button class="alt" id="out2">Keluar</button></div></div>`;
+  $("#ulang").onclick = async () => { const { data } = await sb.auth.getSession(); data.session ? masuk(data.session.user) : loginView(); };
+  $("#out2").onclick = keluar;
+}
+async function keluar() { keluarManual = true; await sb.auth.signOut(); keluarManual = false; stop(); me = null; tab = "presensi"; depth = 0; history.replaceState({ d: 0, t: "presensi" }, ""); loginView(); }
+async function masuk(user) {
+  const { data, error: pe } = await sb.from("profiles").select("id,nama,email,role,kode_mesin,nip").eq("id", user.id).maybeSingle();
+  if (pe) return gagalView("Gagal membaca profil e-Rapor: " + pe.message);
+  if (!data) { toast("Profil e-Rapor tidak ditemukan untuk akun ini.", true); await keluar(); return; }
+  if (!["guru", "staf", "kepsek", "admin"].includes(data.role)) { toast("Akun ini (peran " + data.role + ") tidak dipakai untuk presensi.", true); await keluar(); return; }
+  me = data; me.jabatan = { guru: "Guru", staf: "Staf", kepsek: "Kepala Sekolah", admin: "Admin" }[data.role];
+  const { data: c, error: ce } = await sb.from("presensi_lokasi").select("*").eq("id", 1).single();
+  if (ce) return gagalView("Gagal memuat pengaturan presensi (jika baru pertama kali, jalankan schema_erapor.sql): " + ce.message);
+  cfg = c;
+  shell();
+}
+function shell() {
+  const tabs = [["presensi", "Presensi"], ["riwayat", "Riwayat"]];
+  if (me.role === "admin") tabs.push(["rekap", "Rekap"], ["lokasi", "Lokasi"], ["jadwal", "Jadwal"], ["daftar", "Pegawai"]);
+  $("#app").innerHTML = `<div class="row"><div><h1>${esc(me.nama)}</h1><div class="mut">${esc(me.jabatan)}</div></div><div style="flex:none"><button class="alt" id="out">Keluar</button></div></div>
+  <div class="tabs">${tabs.map(t => `<button class="${t[0] === tab ? "" : "alt"}" data-t="${t[0]}">${t[1]}</button>`).join("")}</div><div id="view"></div>`;
+  $("#out").onclick = keluar;
+  document.querySelectorAll("[data-t]").forEach(b => b.onclick = () => goTab(b.dataset.t));
+  ({ presensi, riwayat, rekap, lokasi, jadwal, daftar })[tab]();
+}
+function stop() { clearInterval(timer); stream?.getTracks().forEach(t => t.stop()); stream = null; if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; } }
+
+/* ---------- Navigasi: gestur/tombol kembali & tarik-untuk-refresh ---------- */
+// Setiap pindah tab menambah satu entri riwayat, sehingga gestur kembali Android (dan tombol back browser) kembali ke tab sebelumnya.
+function goTab(t) {
+  if (t === tab) return;
+  depth++; history.pushState({ d: depth, t }, "");
+  tab = t; stop(); shell();
+}
+window.addEventListener("popstate", e => {
+  if (!me) return;
+  depth = e.state?.d ?? 0; tab = e.state?.t ?? "presensi";
+  stop(); shell();
+});
+let lastBack = 0;
+const AppPlugin = window.Capacitor?.Plugins?.App;
+AppPlugin?.addListener("backButton", () => {
+  if (me && depth > 0) return history.back();               // masih ada tab sebelumnya
+  if (me && Date.now() - lastBack > 2000) { lastBack = Date.now(); return toast("Tekan kembali sekali lagi untuk keluar aplikasi"); }
+  AppPlugin.exitApp();                                       // keluar aplikasi TIDAK menghapus login
+});
+// Saat aplikasi dibuka kembali: pastikan token masih segar tanpa mengeluarkan pengguna.
+AppPlugin?.addListener("appStateChange", ({ isActive }) => {
+  if (isActive) { sb.auth.startAutoRefresh(); sb.auth.getSession(); } else sb.auth.stopAutoRefresh();
+});
+
+async function refresh() {
+  if (!me) return;
+  stop();
+  try {
+    const { data: c } = await sb.from("presensi_lokasi").select("*").eq("id", 1).single();
+    if (c) cfg = c;
+  } catch {}
+  shell(); toast("Data diperbarui.");
+}
+(function pullToRefresh() {
+  const el = $("#ptr"), lbl = el.querySelector("span"), AMBANG = 80, MAKS = 130;
+  let y0 = 0, x0 = 0, tarik = 0, aktif = false, sibuk = false;
+  const pos = (dy, op) => { el.style.transform = `translateY(${dy - 60}px)`; el.style.opacity = op; };
+  const reset = () => { el.style.transition = "transform .2s,opacity .2s"; pos(0, 0); el.classList.remove("spin"); setTimeout(() => el.style.transition = "", 220); };
+  addEventListener("touchstart", e => {
+    aktif = false; tarik = 0;
+    if (sibuk || !me || e.touches.length !== 1 || (document.scrollingElement.scrollTop || 0) > 0) return;
+    if (e.target.closest("input,select,textarea")) return;
+    y0 = e.touches[0].clientY; x0 = e.touches[0].clientX; aktif = true;
+  }, { passive: true });
+  addEventListener("touchmove", e => {
+    if (!aktif) return;
+    const dy = e.touches[0].clientY - y0, dx = Math.abs(e.touches[0].clientX - x0);
+    if (dy <= 0 || dx > dy) { if (tarik) { tarik = 0; reset(); } return; }
+    if ((document.scrollingElement.scrollTop || 0) > 0) { aktif = false; reset(); return; }
+    if (e.cancelable) e.preventDefault();
+    tarik = Math.min(MAKS, dy * .5);
+    lbl.textContent = tarik >= AMBANG * .5 ? "Lepas untuk memuat ulang" : "Tarik ke bawah…";
+    pos(tarik, Math.min(1, tarik / 40));
+  }, { passive: false });
+  const selesai = async () => {
+    if (!aktif) return; aktif = false;
+    if (tarik >= AMBANG * .5) {
+      sibuk = true; el.classList.add("spin"); lbl.innerHTML = "<i></i>Memuat ulang…"; pos(48, 1);
+      await refresh(); sibuk = false;
+    }
+    tarik = 0; reset();
+  };
+  addEventListener("touchend", selesai); addEventListener("touchcancel", selesai);
+})();
+
+/* ---------- Presensi ---------- */
+async function presensi() {
+  const now = new Date(), tgl = ymd(now);
+  const [{ data: hr }, { data: jd }] = await Promise.all([
+    sb.from("presensi_log").select("*").eq("pegawai_id", me.id).eq("tanggal", tgl),
+    sb.from("presensi_jadwal").select("*").eq("pegawai_id", me.id).eq("hari", hariKe(now)).maybeSingle()]);
+  const datang = hr.find(x => x.jenis === "datang"), pulang = hr.find(x => x.jenis === "pulang");
+  const jenis = !datang ? "datang" : !pulang ? "pulang" : null;
+  $("#view").innerHTML = `<div class="card"><div class="clock" id="clk"></div>
+  <div class="mut">${HARI[hariKe(now)]}, ${tgl}</div>
+  <p>${jd ? `Jadwal hari ini: <b>${jd.jam_masuk.slice(0, 5)}–${jd.jam_pulang.slice(0, 5)}</b>` : `<span class="warn">Tidak ada jadwal hari ini.</span>`}</p>
+  <div class="mut">Datang: ${datang ? `${hhmm(new Date(datang.waktu))} (${esc(datang.status)})` : "belum"} · Pulang: ${pulang ? `${hhmm(new Date(pulang.waktu))} (${esc(pulang.status)})` : "belum"}</div></div>
+  ${jenis ? `<div class="card"><h2>Foto presensi ${jenis}</h2><video id="vid" autoplay playsinline muted></video><canvas id="cv" hidden></canvas>
+  <p id="loc" class="mut">Mencari lokasi…</p><div class="row"><button id="snap">Ambil foto & kirim</button></div></div>`
+      : `<div class="card ok">Presensi hari ini sudah lengkap. Terima kasih.</div>`}`;
+  timer = setInterval(() => { const e = $("#clk"); if (e) e.textContent = hhmm(new Date()); }, 1000); $("#clk").textContent = hhmm(new Date());
+  if (!jenis) return;
+  if (!navigator.mediaDevices?.getUserMedia) toast("Kamera tidak didukung di perangkat ini.", true);
+  else try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 640 }, audio: false }); $("#vid").srcObject = stream; }
+  catch { toast("Kamera tidak bisa diakses. Izinkan kamera di pengaturan browser.", true); }
+  let pos = null;
+  watchId = navigator.geolocation.watchPosition(p => {
+    pos = p.coords; const d = jarak(cfg.lat, cfg.lng, pos.latitude, pos.longitude), ok = d <= cfg.radius_m;
+    $("#loc").innerHTML = `<span class="${ok ? "ok" : "bad"}">${ok ? "Di dalam area" : "Di luar area"}</span> — ${d} m dari ${esc(cfg.nama_lokasi)} (batas ${cfg.radius_m} m, akurasi ±${Math.round(pos.accuracy)} m)`;
+  }, () => { $("#loc").innerHTML = `<span class="bad">Lokasi tidak aktif. Aktifkan GPS dan izinkan akses lokasi.</span>`; }, { enableHighAccuracy: true });
+  $("#snap").onclick = async () => {
+    if (!pos) return toast("Lokasi belum didapat.", true);
+    if (jarak(cfg.lat, cfg.lng, pos.latitude, pos.longitude) > cfg.radius_m) return toast("Anda di luar radius presensi.", true);
+    const v = $("#vid"), c = $("#cv"); if (!v.videoWidth) return toast("Kamera belum siap.", true);
+    c.width = v.videoWidth; c.height = v.videoHeight; const g = c.getContext("2d"); g.drawImage(v, 0, 0);
+    g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(0, c.height - 34, c.width, 34); g.fillStyle = "#fff"; g.font = "16px sans-serif";
+    g.fillText(`${me.nama} · ${tgl} ${hhmm(new Date())} · ${pos.latitude.toFixed(5)},${pos.longitude.toFixed(5)}`, 8, c.height - 12);
+    const b64 = c.toDataURL("image/jpeg", .8).split(",")[1];
+    $("#snap").disabled = true;
+    let path;
+    try { path = (await foto({ action: "upload", jenis, foto: b64 })).path; }
+    catch (e) { $("#snap").disabled = false; return toast("Gagal unggah foto: " + e.message, true); }
+    const t = hhmm(new Date()); let status = "tepat waktu";
+    if (jd) {
+      if (jenis === "datang") { const [h, m] = jd.jam_masuk.split(":"); const lim = (+h * 60 + +m + cfg.toleransi_menit) * 60; const [a, b, s] = t.split(":"); if (+a * 3600 + +b * 60 + +s > lim + 59) status = "terlambat"; }
+      else if (t < jd.jam_pulang) status = "pulang cepat";
+    } else status = "tanpa jadwal";
+    const { error } = await sb.from("presensi_log").insert({ pegawai_id: me.id, tanggal: tgl, jenis, lat: pos.latitude, lng: pos.longitude, foto_path: path, status });
+    if (error) { $("#snap").disabled = false; return toast(error.message, true); }
+    toast(`Presensi ${jenis} tercatat (${status}).`); stop(); shell();
+  };
+}
+
+/* ---------- Riwayat & Rekap ---------- */
+async function riwayat() {
+  const { data } = await sb.from("presensi_log").select("*").eq("pegawai_id", me.id).order("waktu", { ascending: false }).limit(60);
+  $("#view").innerHTML = `<div class="card wrap"><table><tr><th>Tanggal</th><th>Jenis</th><th>Jam</th><th>Status</th><th>Jarak</th></tr>${data.map(r => `<tr><td>${r.tanggal}</td><td>${r.jenis}</td><td>${hhmm(new Date(r.waktu))}</td><td class="${r.status === "terlambat" ? "warn" : ""}">${esc(r.status)}</td><td>${r.jarak_m} m</td></tr>`).join("") || `<tr><td>Belum ada data.</td></tr>`}</table></div>`;
+}
+async function rekap() {
+  $("#view").innerHTML = `<div class="card"><div class="row"><input type="date" id="d" value="${ymd(new Date())}"><button id="cari" style="flex:none">Tampilkan</button></div><div class="wrap" id="hasil"></div></div>`;
+  const load = async () => {
+    const d = $("#d").value;
+    const [{ data: pg }, { data: pr }] = await Promise.all([sb.from("profiles").select("id,kode_mesin,nama").in("role", ["guru", "staf", "kepsek"]).order("nama"), sb.from("presensi_log").select("*").eq("tanggal", d)]);
+    let urls = {};
+    try { const paths = pr.map(x => x.foto_path).filter(Boolean); if (paths.length) urls = (await foto({ action: "url", paths })).urls; } catch (e) { toast("Foto tidak bisa dimuat: " + e.message, true); }
+    const rows = await Promise.all(pg.map(async p => {
+      const f = j => pr.find(x => x.pegawai_id === p.id && x.jenis === j);
+      const cell = async r => { if (!r) return `<td class="bad">—</td><td></td>`; const u = { signedUrl: urls[r.foto_path] }; return `<td>${hhmm(new Date(r.waktu))} <span class="${r.status === "terlambat" ? "warn" : "mut"}">${esc(r.status)}</span></td><td><a href="${u?.signedUrl}" target="_blank" rel="noopener">foto</a></td>`; };
+      return `<tr><td>${esc(p.nama)}</td>${await cell(f("datang"))}${await cell(f("pulang"))}</tr>`;
+    }));
+    $("#hasil").innerHTML = `<table><tr><th>Nama</th><th>Datang</th><th></th><th>Pulang</th><th></th></tr>${rows.join("")}</table>`;
+  };
+  $("#cari").onclick = load; load();
+}
+
+/* ---------- Admin: lokasi ---------- */
+function lokasi() {
+  $("#view").innerHTML = `<div class="card"><h2>Titik lokasi & radius absen</h2>
+  <label>Nama lokasi</label><input id="nm" value="${esc(cfg.nama_lokasi)}">
+  <div class="row"><div><label>Latitude</label><input id="la" type="number" step="any" value="${cfg.lat}"></div><div><label>Longitude</label><input id="lo" type="number" step="any" value="${cfg.lng}"></div></div>
+  <div class="row"><div><label>Radius (meter)</label><input id="rd" type="number" min="10" value="${cfg.radius_m}"></div><div><label>Toleransi terlambat (menit)</label><input id="tl" type="number" min="0" value="${cfg.toleransi_menit}"></div></div>
+  <p class="row"><button class="alt" id="gps">Pakai lokasi saya sekarang</button><button id="sv">Simpan</button></p>
+  <p class="mut"><a id="mp" target="_blank" rel="noopener">Lihat titik di peta</a></p></div>`;
+  const mp = () => $("#mp").href = `https://www.google.com/maps?q=${$("#la").value},${$("#lo").value}`; mp();
+  $("#gps").onclick = () => navigator.geolocation.getCurrentPosition(p => { $("#la").value = p.coords.latitude; $("#lo").value = p.coords.longitude; mp(); }, () => toast("Lokasi tidak bisa diakses.", true), { enableHighAccuracy: true });
+  $("#sv").onclick = async () => {
+    const v = { nama_lokasi: $("#nm").value, lat: +$("#la").value, lng: +$("#lo").value, radius_m: +$("#rd").value, toleransi_menit: +$("#tl").value };
+    const { error } = await sb.from("presensi_lokasi").update(v).eq("id", 1);
+    error ? toast(error.message, true) : (Object.assign(cfg, v), toast("Lokasi tersimpan."));
+  };
+}
+
+/* ---------- Admin: jadwal ---------- */
+async function jadwal() {
+  const { data } = await sb.from("presensi_jadwal").select("hari,jam_masuk,jam_pulang,profiles(nama,kode_mesin)").order("hari");
+  $("#view").innerHTML = `<div class="card"><h2>Unggah jadwal kerja</h2><p class="mut">File CSV dengan kolom: <b>kode_mesin, hari, jam_masuk, jam_pulang</b>. Hari bisa angka 1–7 atau nama (Senin…). Jadwal lama untuk kode mesin yang sama akan diganti.</p>
+  <input type="file" id="f" accept=".csv,.txt"><p><button id="up">Unggah jadwal</button></p></div>
+  <div class="card wrap"><table><tr><th>Nama</th><th>Hari</th><th>Masuk</th><th>Pulang</th></tr>${data.map(r => `<tr><td>${esc(r.profiles?.nama)}</td><td>${HARI[r.hari]}</td><td>${r.jam_masuk.slice(0, 5)}</td><td>${r.jam_pulang.slice(0, 5)}</td></tr>`).join("")}</table></div>`;
+  $("#up").onclick = async () => {
+    const f = $("#f").files[0]; if (!f) return toast("Pilih file CSV dulu.", true);
+    const rows = csv(await readFile(f)); const { data: pg } = await sb.from("profiles").select("id,kode_mesin").not("kode_mesin", "is", null);
+    const map = Object.fromEntries(pg.map(p => [p.kode_mesin, p.id])), out = [], miss = new Set();
+    for (const r of rows) {
+      const id = map[r.kode_mesin]; if (!id) { miss.add(r.kode_mesin); continue; }
+      let h = parseInt(r.hari) || HARI.findIndex(n => n.toLowerCase() === (r.hari || "").toLowerCase());
+      if (h < 1 || h > 7) continue;
+      out.push({ pegawai_id: id, hari: h, jam_masuk: r.jam_masuk, jam_pulang: r.jam_pulang });
+    }
+    const ids = [...new Set(out.map(o => o.pegawai_id))];
+    if (ids.length) await sb.from("presensi_jadwal").delete().in("pegawai_id", ids);
+    const { error } = await sb.from("presensi_jadwal").insert(out);
+    if (error) return toast(error.message, true);
+    toast(`${out.length} jadwal tersimpan.` + (miss.size ? ` kode mesin tidak ditemukan: ${[...miss].join(", ")}` : "")); jadwal();
+  };
+}
+
+/* ---------- Admin: data guru (sinkron e-Rapor) ---------- */
+async function daftar() {
+  const { data } = await sb.from("profiles").select("nama,email,role,kode_mesin").in("role", ["guru", "staf", "kepsek"]).order("nama");
+  const kosong = data.filter(p => !p.kode_mesin).length;
+  $("#view").innerHTML = `<div class="card wrap"><h2>${data.length} pegawai dari e-Rapor</h2>
+  <p class="mut">Data dibaca langsung dari e-Rapor, tanpa sinkron. Kode mesin diisi di menu Guru PDP. ${kosong ? `<span class="warn">${kosong} orang belum punya kode mesin, jadwalnya tidak bisa diunggah.</span>` : ""}</p>
+  <table><tr><th>Kode mesin</th><th>Nama</th><th>Email</th><th>Peran</th></tr>${data.map(p => `<tr><td>${esc(p.kode_mesin) || "—"}</td><td>${esc(p.nama)}</td><td>${esc(p.email)}</td><td>${esc(p.role)}</td></tr>`).join("")}</table></div>`;
+}
+init();
+</script>
+</body>
+</html>
