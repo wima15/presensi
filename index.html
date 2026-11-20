@@ -35,9 +35,20 @@ th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-
 <div id="app"></div>
 </main>
 <script>
-const SUPABASE_URL = "https://nrwexyezcbmsokelgkmp.supabase.co";
-const SUPABASE_KEY = "sb_publishable_eKH7VdAJy17PjYuTL-3X9w_pKViejAd";
+// Memakai project e-Rapor/PDP: login & data pegawai (tabel profiles) langsung dari sana.
+const SUPABASE_URL = "https://iejpwxmcqwecejsrezry.supabase.co";
+const SUPABASE_KEY = "sb_publishable_dZfvfiSsA-JAndPn172VSg_sq_zRWqS";
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+// Foto disimpan di project Supabase TERPISAH. Browser tidak memegang kunci project itu:
+// foto dikirim lewat Edge Function yang memverifikasi sesi login e-Rapor.
+const FOTO_FN = "https://nrwexyezcbmsokelgkmp.supabase.co/functions/v1/foto-presensi";
+async function foto(body) {
+  const { data } = await sb.auth.getSession();
+  const r = await fetch(FOTO_FN, { method: "POST", headers: { "Content-Type": "application/json", "x-rapor-token": data.session?.access_token || "" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || "Server foto menolak (" + r.status + ")");
+  return j;
+}
 const $ = s => document.querySelector(s);
 const HARI = ["", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"];
 let me = null, cfg = null, stream = null, tab = "presensi", timer = null;
@@ -62,30 +73,34 @@ async function init() {
   data.session ? await masuk(data.session.user) : loginView();
 }
 function loginView() {
-  $("#app").innerHTML = `<div class="card"><h1>Presensi Sekolah</h1><p class="mut">Masuk dengan akun yang diberikan admin.</p>
+  $("#app").innerHTML = `<div class="card"><h1>Presensi Sekolah</h1><p class="mut">Masuk dengan email dan kata sandi akun e-Rapor/PDP.</p>
   <label for="em">Email</label><input id="em" type="email" autocomplete="username">
   <label for="pw">Kata sandi</label><input id="pw" type="password" autocomplete="current-password">
   <p><button id="go">Masuk</button></p></div>`;
   $("#go").onclick = async () => {
     const { data, error } = await sb.auth.signInWithPassword({ email: $("#em").value.trim(), password: $("#pw").value });
-    if (error) return toast("Email atau kata sandi salah.", true);
+    if (error) return toast(/invalid login/i.test(error.message) ? "Email atau kata sandi salah, atau akun belum dibuat di Authentication > Users." : /confirm/i.test(error.message) ? "Email belum dikonfirmasi. Konfirmasi di Authentication > Users." : "Gagal masuk: " + error.message, true);
     masuk(data.user);
   };
 }
 async function masuk(user) {
-  const { data } = await sb.from("pegawai").select("*").eq("email", user.email).maybeSingle();
-  if (!data) { toast("Email belum terdaftar sebagai pegawai. Hubungi admin.", true); await sb.auth.signOut(); return loginView(); }
-  me = data; cfg = (await sb.from("pengaturan").select("*").eq("id", 1).single()).data;
+  const { data, error: pe } = await sb.from("profiles").select("id,nama,email,role,kode_mesin,nip").eq("id", user.id).maybeSingle();
+  if (pe || !data) { toast("Gagal membaca profil e-Rapor: " + (pe?.message || "profil tidak ditemukan"), true); await sb.auth.signOut(); return loginView(); }
+  if (!["guru", "staf", "kepsek", "admin"].includes(data.role)) { toast("Akun ini (peran " + data.role + ") tidak dipakai untuk presensi.", true); await sb.auth.signOut(); return loginView(); }
+  me = data; me.jabatan = { guru: "Guru", staf: "Staf", kepsek: "Kepala Sekolah", admin: "Admin" }[data.role];
+  const { data: c, error: ce } = await sb.from("presensi_lokasi").select("*").eq("id", 1).single();
+  if (ce) { toast("Tabel presensi belum dibuat: jalankan schema_erapor.sql. (" + ce.message + ")", true); await sb.auth.signOut(); return loginView(); }
+  cfg = c;
   shell();
 }
 function shell() {
   const tabs = [["presensi", "Presensi"], ["riwayat", "Riwayat"]];
-  if (me.role === "admin") tabs.push(["rekap", "Rekap"], ["lokasi", "Lokasi"], ["jadwal", "Jadwal"], ["guru", "Data guru"]);
-  $("#app").innerHTML = `<div class="row"><div><h1>${esc(me.nama)}</h1><div class="mut">${esc(me.jabatan || me.tipe)}</div></div><div style="flex:none"><button class="alt" id="out">Keluar</button></div></div>
+  if (me.role === "admin") tabs.push(["rekap", "Rekap"], ["lokasi", "Lokasi"], ["jadwal", "Jadwal"], ["daftar", "Pegawai"]);
+  $("#app").innerHTML = `<div class="row"><div><h1>${esc(me.nama)}</h1><div class="mut">${esc(me.jabatan)}</div></div><div style="flex:none"><button class="alt" id="out">Keluar</button></div></div>
   <div class="tabs">${tabs.map(t => `<button class="${t[0] === tab ? "" : "alt"}" data-t="${t[0]}">${t[1]}</button>`).join("")}</div><div id="view"></div>`;
   $("#out").onclick = async () => { await sb.auth.signOut(); stop(); me = null; loginView(); };
   document.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { tab = b.dataset.t; stop(); shell(); });
-  ({ presensi, riwayat, rekap, lokasi, jadwal, guru })[tab]();
+  ({ presensi, riwayat, rekap, lokasi, jadwal, daftar })[tab]();
 }
 function stop() { clearInterval(timer); stream?.getTracks().forEach(t => t.stop()); stream = null; }
 
@@ -93,8 +108,8 @@ function stop() { clearInterval(timer); stream?.getTracks().forEach(t => t.stop(
 async function presensi() {
   const now = new Date(), tgl = ymd(now);
   const [{ data: hr }, { data: jd }] = await Promise.all([
-    sb.from("presensi").select("*").eq("pegawai_id", me.id).eq("tanggal", tgl),
-    sb.from("jadwal").select("*").eq("pegawai_id", me.id).eq("hari", hariKe(now)).maybeSingle()]);
+    sb.from("presensi_log").select("*").eq("pegawai_id", me.id).eq("tanggal", tgl),
+    sb.from("presensi_jadwal").select("*").eq("pegawai_id", me.id).eq("hari", hariKe(now)).maybeSingle()]);
   const datang = hr.find(x => x.jenis === "datang"), pulang = hr.find(x => x.jenis === "pulang");
   const jenis = !datang ? "datang" : !pulang ? "pulang" : null;
   $("#view").innerHTML = `<div class="card"><div class="clock" id="clk"></div>
@@ -120,17 +135,17 @@ async function presensi() {
     c.width = v.videoWidth; c.height = v.videoHeight; const g = c.getContext("2d"); g.drawImage(v, 0, 0);
     g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(0, c.height - 34, c.width, 34); g.fillStyle = "#fff"; g.font = "16px sans-serif";
     g.fillText(`${me.nama} · ${tgl} ${hhmm(new Date())} · ${pos.latitude.toFixed(5)},${pos.longitude.toFixed(5)}`, 8, c.height - 12);
-    const blob = await new Promise(r => c.toBlob(r, "image/jpeg", .8));
+    const b64 = c.toDataURL("image/jpeg", .8).split(",")[1];
     $("#snap").disabled = true;
-    const path = `${me.id}/${tgl}-${jenis}.jpg`;
-    const up = await sb.storage.from("selfie").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
-    if (up.error) { $("#snap").disabled = false; return toast("Gagal unggah foto: " + up.error.message, true); }
+    let path;
+    try { path = (await foto({ action: "upload", jenis, foto: b64 })).path; }
+    catch (e) { $("#snap").disabled = false; return toast("Gagal unggah foto: " + e.message, true); }
     const t = hhmm(new Date()); let status = "tepat waktu";
     if (jd) {
       if (jenis === "datang") { const [h, m] = jd.jam_masuk.split(":"); const lim = (+h * 60 + +m + cfg.toleransi_menit) * 60; const [a, b, s] = t.split(":"); if (+a * 3600 + +b * 60 + +s > lim + 59) status = "terlambat"; }
       else if (t < jd.jam_pulang) status = "pulang cepat";
     } else status = "tanpa jadwal";
-    const { error } = await sb.from("presensi").insert({ pegawai_id: me.id, tanggal: tgl, jenis, lat: pos.latitude, lng: pos.longitude, foto_path: path, status });
+    const { error } = await sb.from("presensi_log").insert({ pegawai_id: me.id, tanggal: tgl, jenis, lat: pos.latitude, lng: pos.longitude, foto_path: path, status });
     if (error) { $("#snap").disabled = false; return toast(error.message, true); }
     toast(`Presensi ${jenis} tercatat (${status}).`); stop(); shell();
   };
@@ -138,17 +153,19 @@ async function presensi() {
 
 /* ---------- Riwayat & Rekap ---------- */
 async function riwayat() {
-  const { data } = await sb.from("presensi").select("*").eq("pegawai_id", me.id).order("waktu", { ascending: false }).limit(60);
+  const { data } = await sb.from("presensi_log").select("*").eq("pegawai_id", me.id).order("waktu", { ascending: false }).limit(60);
   $("#view").innerHTML = `<div class="card wrap"><table><tr><th>Tanggal</th><th>Jenis</th><th>Jam</th><th>Status</th><th>Jarak</th></tr>${data.map(r => `<tr><td>${r.tanggal}</td><td>${r.jenis}</td><td>${hhmm(new Date(r.waktu))}</td><td class="${r.status === "terlambat" ? "warn" : ""}">${esc(r.status)}</td><td>${r.jarak_m} m</td></tr>`).join("") || `<tr><td>Belum ada data.</td></tr>`}</table></div>`;
 }
 async function rekap() {
   $("#view").innerHTML = `<div class="card"><div class="row"><input type="date" id="d" value="${ymd(new Date())}"><button id="cari" style="flex:none">Tampilkan</button></div><div class="wrap" id="hasil"></div></div>`;
   const load = async () => {
     const d = $("#d").value;
-    const [{ data: pg }, { data: pr }] = await Promise.all([sb.from("pegawai").select("id,nip,nama").eq("aktif", true).order("nama"), sb.from("presensi").select("*").eq("tanggal", d)]);
+    const [{ data: pg }, { data: pr }] = await Promise.all([sb.from("profiles").select("id,kode_mesin,nama").in("role", ["guru", "staf", "kepsek"]).order("nama"), sb.from("presensi_log").select("*").eq("tanggal", d)]);
+    let urls = {};
+    try { const paths = pr.map(x => x.foto_path).filter(Boolean); if (paths.length) urls = (await foto({ action: "url", paths })).urls; } catch (e) { toast("Foto tidak bisa dimuat: " + e.message, true); }
     const rows = await Promise.all(pg.map(async p => {
       const f = j => pr.find(x => x.pegawai_id === p.id && x.jenis === j);
-      const cell = async r => { if (!r) return `<td class="bad">—</td><td></td>`; const { data: u } = await sb.storage.from("selfie").createSignedUrl(r.foto_path, 3600); return `<td>${hhmm(new Date(r.waktu))} <span class="${r.status === "terlambat" ? "warn" : "mut"}">${esc(r.status)}</span></td><td><a href="${u?.signedUrl}" target="_blank" rel="noopener">foto</a></td>`; };
+      const cell = async r => { if (!r) return `<td class="bad">—</td><td></td>`; const u = { signedUrl: urls[r.foto_path] }; return `<td>${hhmm(new Date(r.waktu))} <span class="${r.status === "terlambat" ? "warn" : "mut"}">${esc(r.status)}</span></td><td><a href="${u?.signedUrl}" target="_blank" rel="noopener">foto</a></td>`; };
       return `<tr><td>${esc(p.nama)}</td>${await cell(f("datang"))}${await cell(f("pulang"))}</tr>`;
     }));
     $("#hasil").innerHTML = `<table><tr><th>Nama</th><th>Datang</th><th></th><th>Pulang</th><th></th></tr>${rows.join("")}</table>`;
@@ -168,63 +185,42 @@ function lokasi() {
   $("#gps").onclick = () => navigator.geolocation.getCurrentPosition(p => { $("#la").value = p.coords.latitude; $("#lo").value = p.coords.longitude; mp(); }, () => toast("Lokasi tidak bisa diakses.", true), { enableHighAccuracy: true });
   $("#sv").onclick = async () => {
     const v = { nama_lokasi: $("#nm").value, lat: +$("#la").value, lng: +$("#lo").value, radius_m: +$("#rd").value, toleransi_menit: +$("#tl").value };
-    const { error } = await sb.from("pengaturan").update(v).eq("id", 1);
+    const { error } = await sb.from("presensi_lokasi").update(v).eq("id", 1);
     error ? toast(error.message, true) : (Object.assign(cfg, v), toast("Lokasi tersimpan."));
   };
 }
 
 /* ---------- Admin: jadwal ---------- */
 async function jadwal() {
-  const { data } = await sb.from("jadwal").select("hari,jam_masuk,jam_pulang,pegawai(nama,nip)").order("hari");
-  $("#view").innerHTML = `<div class="card"><h2>Unggah jadwal kerja</h2><p class="mut">File CSV dengan kolom: <b>nip, hari, jam_masuk, jam_pulang</b>. Hari bisa angka 1–7 atau nama (Senin…). Jadwal lama untuk NIP yang sama akan diganti.</p>
+  const { data } = await sb.from("presensi_jadwal").select("hari,jam_masuk,jam_pulang,profiles(nama,kode_mesin)").order("hari");
+  $("#view").innerHTML = `<div class="card"><h2>Unggah jadwal kerja</h2><p class="mut">File CSV dengan kolom: <b>kode_mesin, hari, jam_masuk, jam_pulang</b>. Hari bisa angka 1–7 atau nama (Senin…). Jadwal lama untuk kode mesin yang sama akan diganti.</p>
   <input type="file" id="f" accept=".csv,.txt"><p><button id="up">Unggah jadwal</button></p></div>
-  <div class="card wrap"><table><tr><th>Nama</th><th>Hari</th><th>Masuk</th><th>Pulang</th></tr>${data.map(r => `<tr><td>${esc(r.pegawai?.nama)}</td><td>${HARI[r.hari]}</td><td>${r.jam_masuk.slice(0, 5)}</td><td>${r.jam_pulang.slice(0, 5)}</td></tr>`).join("")}</table></div>`;
+  <div class="card wrap"><table><tr><th>Nama</th><th>Hari</th><th>Masuk</th><th>Pulang</th></tr>${data.map(r => `<tr><td>${esc(r.profiles?.nama)}</td><td>${HARI[r.hari]}</td><td>${r.jam_masuk.slice(0, 5)}</td><td>${r.jam_pulang.slice(0, 5)}</td></tr>`).join("")}</table></div>`;
   $("#up").onclick = async () => {
     const f = $("#f").files[0]; if (!f) return toast("Pilih file CSV dulu.", true);
-    const rows = csv(await readFile(f)); const { data: pg } = await sb.from("pegawai").select("id,nip");
-    const map = Object.fromEntries(pg.map(p => [p.nip, p.id])), out = [], miss = new Set();
+    const rows = csv(await readFile(f)); const { data: pg } = await sb.from("profiles").select("id,kode_mesin").not("kode_mesin", "is", null);
+    const map = Object.fromEntries(pg.map(p => [p.kode_mesin, p.id])), out = [], miss = new Set();
     for (const r of rows) {
-      const id = map[r.nip]; if (!id) { miss.add(r.nip); continue; }
+      const id = map[r.kode_mesin]; if (!id) { miss.add(r.kode_mesin); continue; }
       let h = parseInt(r.hari) || HARI.findIndex(n => n.toLowerCase() === (r.hari || "").toLowerCase());
       if (h < 1 || h > 7) continue;
       out.push({ pegawai_id: id, hari: h, jam_masuk: r.jam_masuk, jam_pulang: r.jam_pulang });
     }
     const ids = [...new Set(out.map(o => o.pegawai_id))];
-    if (ids.length) await sb.from("jadwal").delete().in("pegawai_id", ids);
-    const { error } = await sb.from("jadwal").insert(out);
+    if (ids.length) await sb.from("presensi_jadwal").delete().in("pegawai_id", ids);
+    const { error } = await sb.from("presensi_jadwal").insert(out);
     if (error) return toast(error.message, true);
-    toast(`${out.length} jadwal tersimpan.` + (miss.size ? ` NIP tidak ditemukan: ${[...miss].join(", ")}` : "")); jadwal();
+    toast(`${out.length} jadwal tersimpan.` + (miss.size ? ` kode mesin tidak ditemukan: ${[...miss].join(", ")}` : "")); jadwal();
   };
 }
 
 /* ---------- Admin: data guru (sinkron e-Rapor) ---------- */
-async function guru() {
-  const { data } = await sb.from("pegawai").select("*").order("nama");
-  $("#view").innerHTML = `<div class="card"><h2>Sinkron data guru dari e-Rapor</h2>
-  <p class="mut">Pilih salah satu. Kolom: <b>nip, nama, email, jabatan, tipe</b> (guru/karyawan). Data dicocokkan lewat NIP; yang sudah ada diperbarui, yang baru ditambahkan.</p>
-  <label>Dari file ekspor e-Rapor (CSV)</label><input type="file" id="f" accept=".csv,.txt"><p><button id="imp">Sinkron dari file</button></p>
-  <hr style="border:0;border-top:1px solid var(--line);margin:14px 0"><h2>Langsung dari e-Rapor</h2>
-  <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="ak" style="width:auto"> Buat akun login untuk guru baru</label>
-  <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="nk" style="width:auto"> Nonaktifkan guru yang sudah tidak ada di e-Rapor</label>
-  <p class="row"><button class="alt" id="plan">Cek dulu</button><button id="api">Sinkron dari e-Rapor</button></p><pre id="hs" class="mut" style="white-space:pre-wrap"></pre>
-</div>
-  <div class="card wrap"><h2>${data.length} pegawai</h2><table><tr><th>NIP</th><th>Nama</th><th>Email</th><th>Tipe</th><th>Peran</th></tr>${data.map(p => `<tr><td>${esc(p.nip)}</td><td>${esc(p.nama)}</td><td>${esc(p.email)}</td><td>${esc(p.tipe)}</td><td>${esc(p.role)}</td></tr>`).join("")}</table></div>`;
-  const simpan = async rows => {
-    const out = rows.filter(r => r.nip && r.nama).map(r => ({ nip: String(r.nip), nama: r.nama, email: (r.email || "").toLowerCase() || null, jabatan: r.jabatan || null, tipe: (r.tipe || "guru").toLowerCase(), sumber: "erapor", updated_at: new Date().toISOString() }));
-    if (!out.length) return toast("Tidak ada baris valid (butuh kolom nip dan nama).", true);
-    const { error } = await sb.from("pegawai").upsert(out, { onConflict: "nip" });
-    error ? toast(error.message, true) : (toast(`${out.length} data tersinkron.`), guru());
-  };
-  $("#imp").onclick = async () => { const f = $("#f").files[0]; f ? simpan(csv(await readFile(f))) : toast("Pilih file dulu.", true); };
-  const jalan = action => async () => {
-    $("#hs").textContent = "Memproses…";
-    const { data: d, error } = await sb.functions.invoke("sync-erapor", { body: { action, buat_akun: $("#ak").checked, nonaktifkan: $("#nk").checked } });
-    let r = d; if (error) { try { r = await error.context.json(); } catch { r = { error: error.message }; } }
-    if (r?.error) { $("#hs").textContent = ""; return toast(r.error, true); }
-    $("#hs").textContent = JSON.stringify(r, null, 2);
-    if (action === "apply") { toast("Sinkron e-Rapor selesai."); setTimeout(guru, 2500); }
-  };
-  $("#plan").onclick = jalan("plan"); $("#api").onclick = jalan("apply");
+async function daftar() {
+  const { data } = await sb.from("profiles").select("nama,email,role,kode_mesin").in("role", ["guru", "staf", "kepsek"]).order("nama");
+  const kosong = data.filter(p => !p.kode_mesin).length;
+  $("#view").innerHTML = `<div class="card wrap"><h2>${data.length} pegawai dari e-Rapor</h2>
+  <p class="mut">Data dibaca langsung dari e-Rapor, tanpa sinkron. Kode mesin diisi di menu Guru PDP. ${kosong ? `<span class="warn">${kosong} orang belum punya kode mesin, jadwalnya tidak bisa diunggah.</span>` : ""}</p>
+  <table><tr><th>Kode mesin</th><th>Nama</th><th>Email</th><th>Peran</th></tr>${data.map(p => `<tr><td>${esc(p.kode_mesin) || "—"}</td><td>${esc(p.nama)}</td><td>${esc(p.email)}</td><td>${esc(p.role)}</td></tr>`).join("")}</table></div>`;
 }
 init();
 </script>

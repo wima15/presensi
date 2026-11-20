@@ -1,104 +1,77 @@
-// EDGE FUNCTION: sync-erapor  (deploy di project Supabase PRESENSI)
-// Menarik guru & staf dari project Supabase e-Rapor ke tabel `pegawai`.
+// EDGE FUNCTION: foto-presensi  (deploy di project FOTO, bukan project e-Rapor)
+// Menerima foto selfie dari aplikasi presensi dan menyimpannya di Storage project ini.
+// Identitas pengirim diverifikasi ke project e-Rapor memakai token login e-Rapor
+// (header x-rapor-token), jadi tidak perlu akun ganda.
 //
-// Secrets (Dashboard > Edge Functions > Secrets):
-//   RAPOR_URL          = https://iejpwxmcqwecejsrezry.supabase.co
-//   RAPOR_SERVICE_KEY  = service_role key project e-Rapor   (JANGAN ditaruh di HTML)
-//   AKUN_PASSWORD      = (opsional) kata sandi awal akun baru, default "guruku123"
+// PENTING: matikan "Verify JWT" untuk fungsi ini (token e-Rapor bukan JWT project ini):
+//   supabase functions deploy foto-presensi --no-verify-jwt
+//   atau Dashboard > Edge Functions > foto-presensi > Details > Verify JWT: OFF
 //
-// POST body: { action: "plan" | "apply", buat_akun?: boolean, nonaktifkan?: boolean }
-//   plan  -> hanya ringkasan, tidak menulis apa pun
-//   apply -> upsert ke pegawai (kunci: NIP, cadangan NUPTK); tidak menghapus data
-// Hanya admin presensi yang boleh memanggil. Role admin & pengawas di e-Rapor dilewati.
+// Secrets (Edge Functions > Secrets):
+//   RAPOR_URL       = https://iejpwxmcqwecejsrezry.supabase.co
+//   RAPOR_ANON_KEY  = kunci publishable/anon project e-Rapor (kunci publik, bukan service_role)
+//
+// POST { action:"upload", jenis:"datang"|"pulang", foto:<base64 jpeg> } -> { path }
+// POST { action:"url", paths:[...] } -> { urls:{path:signedUrl} }   (admin: semua; lainnya: hanya foto sendiri)
 import { createClient } from "npm:@supabase/supabase-js@2";
 
-const URL_ = Deno.env.get("SUPABASE_URL")!;
-const SRK = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const RAPOR_URL = Deno.env.get("RAPOR_URL") ?? "";
-const RAPOR_KEY = Deno.env.get("RAPOR_SERVICE_KEY") ?? "";
-const PASS = Deno.env.get("AKUN_PASSWORD") ?? "guruku123";
+const RAPOR_URL = (Deno.env.get("RAPOR_URL") ?? "").replace(/\/+$/, "");
+const RAPOR_ANON = Deno.env.get("RAPOR_ANON_KEY") ?? "";
+const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
+const BUCKET = "selfie", MAX = 2 * 1024 * 1024;
 const cors = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "content-type, x-rapor-token, authorization, apikey, x-client-info",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } });
-const norm = (s: unknown) => String(s ?? "").trim();
+
+async function siapa(token: string) {
+  if (!token) return null;
+  const h = { apikey: RAPOR_ANON, Authorization: `Bearer ${token}` };
+  const u = await fetch(`${RAPOR_URL}/auth/v1/user`, { headers: h });
+  if (!u.ok) return null;
+  const { id } = await u.json();
+  const p = await fetch(`${RAPOR_URL}/rest/v1/profiles?id=eq.${id}&select=role`, { headers: h });
+  const rows = await p.json();
+  return { id: id as string, role: Array.isArray(rows) ? (rows[0]?.role as string) : undefined };
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
   if (req.method !== "POST") return json({ error: "Gunakan POST" }, 405);
-  if (!RAPOR_URL || !RAPOR_KEY) return json({ error: "Secret RAPOR_URL / RAPOR_SERVICE_KEY belum diisi." }, 500);
+  if (!RAPOR_URL || !RAPOR_ANON) return json({ error: "Secret RAPOR_URL / RAPOR_ANON_KEY belum diisi." }, 500);
 
-  // --- hanya admin presensi ---
-  const auth = req.headers.get("Authorization") ?? "";
-  const db = createClient(URL_, SRK, { auth: { persistSession: false } });
-  const { data: u, error: ue } = await db.auth.getUser(auth.replace(/^Bearer\s+/i, ""));
-  if (ue || !u?.user?.email) return json({ error: "Belum login" }, 401);
-  const { data: adm } = await db.from("pegawai").select("role").eq("email", u.user.email.toLowerCase()).maybeSingle();
-  if (adm?.role !== "admin") return json({ error: "Hanya admin yang boleh sinkron" }, 403);
+  const me = await siapa(req.headers.get("x-rapor-token") ?? "");
+  if (!me) return json({ error: "Sesi login e-Rapor tidak valid. Login ulang." }, 401);
+  if (!["guru", "staf", "kepsek", "admin"].includes(me.role ?? "")) return json({ error: "Peran tidak diizinkan" }, 403);
 
   const body = await req.json().catch(() => ({}));
   try {
-    const rapor = createClient(RAPOR_URL, RAPOR_KEY, { auth: { persistSession: false } });
-    // deno-lint-ignore no-explicit-any
-    const src: any[] = [];
-    for (let f = 0; ; f += 1000) {
-      const { data, error } = await rapor.from("profiles").select("id,nama,email,role,nip,nuptk")
-        .in("role", ["guru", "staf", "kepsek"]).order("id").range(f, f + 999);
-      if (error) return json({ error: "e-Rapor: " + error.message }, 400);
-      src.push(...(data ?? []));
-      if (!data || data.length < 1000) break;
+    if (body.action === "upload") {
+      if (!["datang", "pulang"].includes(body.jenis)) return json({ error: "jenis tidak valid" }, 400);
+      const bin = Uint8Array.from(atob(String(body.foto ?? "")), (c) => c.charCodeAt(0));
+      if (bin.length < 1000 || bin.length > MAX) return json({ error: "Ukuran foto tidak wajar" }, 400);
+      if (bin[0] !== 0xff || bin[1] !== 0xd8 || bin[2] !== 0xff) return json({ error: "Bukan file JPEG" }, 400);
+      const tgl = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }); // tanggal server, bukan klien
+      const path = `${me.id}/${tgl}-${body.jenis}.jpg`;
+      const { error } = await db.storage.from(BUCKET).upload(path, bin, { upsert: true, contentType: "image/jpeg" });
+      if (error) return json({ error: error.message }, 500);
+      return json({ path });
     }
-
-    const rows: Record<string, unknown>[] = [], skip: string[] = [], seen = new Set<string>();
-    for (const g of src) {
-      const nip = norm(g.nip) || norm(g.nuptk);
-      let email = norm(g.email).toLowerCase();
-      if (!email) email = norm((await rapor.auth.admin.getUserById(g.id)).data?.user?.email).toLowerCase();
-      if (!nip) { skip.push(`${g.nama}: NIP/NUPTK kosong`); continue; }
-      if (seen.has(nip)) { skip.push(`${g.nama}: NIP ${nip} ganda`); continue; }
-      seen.add(nip);
-      rows.push({
-        nip, nama: norm(g.nama), email: email || null,
-        jabatan: g.role === "kepsek" ? "Kepala Sekolah" : g.role === "staf" ? "Staf" : "Guru",
-        tipe: g.role === "staf" ? "karyawan" : "guru", sumber: "erapor", aktif: true,
-        updated_at: new Date().toISOString(),
-      });
-    }
-
-    const { data: ada } = await db.from("pegawai").select("nip,sumber");
-    const nipAda = new Set((ada ?? []).map((p) => p.nip));
-    const baru = rows.filter((r) => !nipAda.has(r.nip as string)).length;
-    const hilang = (ada ?? []).filter((p) => p.sumber === "erapor" && !seen.has(p.nip)).length;
-
-    if (body.action === "plan") {
-      return json({ total: rows.length, baru, diperbarui: rows.length - baru, tidak_ada_di_erapor: hilang, dilewati: skip.slice(0, 30) });
-    }
-    if (body.action !== "apply") return json({ error: "action tidak dikenal" }, 400);
-
-    // jangan timpa role admin lokal: upsert tanpa kolom role
-    const errors: string[] = [];
-    const { error } = await db.from("pegawai").upsert(rows, { onConflict: "nip" });
-    if (error) return json({ error: error.message }, 400);
-
-    let akun = 0;
-    if (body.buat_akun === true) {
-      for (const r of rows) {
-        if (!r.email) continue;
-        const { error: e } = await db.auth.admin.createUser({ email: r.email as string, password: PASS, email_confirm: true });
-        if (!e) akun++;
-        else if (!/already|registered|exists/i.test(e.message)) errors.push(`${r.nama}: ${e.message}`);
+    if (body.action === "url") {
+      const paths: string[] = (Array.isArray(body.paths) ? body.paths : []).slice(0, 300).map(String);
+      const ok = paths.filter((p) => me.role === "admin" || p.startsWith(me.id + "/"));
+      const urls: Record<string, string> = {};
+      if (ok.length) {
+        const { data, error } = await db.storage.from(BUCKET).createSignedUrls(ok, 3600);
+        if (error) return json({ error: error.message }, 500);
+        for (const d of data ?? []) if (d.signedUrl && d.path) urls[d.path] = d.signedUrl;
       }
+      return json({ urls });
     }
-    let nonaktif = 0;
-    if (body.nonaktifkan === true && hilang) {
-      const { data } = await db.from("pegawai").update({ aktif: false })
-        .eq("sumber", "erapor").not("nip", "in", `(${[...seen].map((n) => `"${n}"`).join(",")})`).select("id");
-      nonaktif = data?.length ?? 0;
-    }
-    return json({ disinkron: rows.length, baru, akun_dibuat: akun, dinonaktifkan: nonaktif, dilewati: skip.slice(0, 30), errors, password_awal: akun ? PASS : undefined });
+    return json({ error: "action tidak dikenal" }, 400);
   } catch (e) {
     return json({ error: String(e) }, 500);
   }
