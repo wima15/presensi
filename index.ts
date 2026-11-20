@@ -18,7 +18,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 const RAPOR_URL = (Deno.env.get("RAPOR_URL") ?? "").replace(/\/+$/, "");
 const RAPOR_ANON = Deno.env.get("RAPOR_ANON_KEY") ?? "";
 const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
-const BUCKET = "selfie", MAX = 2 * 1024 * 1024;
+const BUCKET = "selfie", MAX = 20 * 1024; // batas 20 KB
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "content-type, x-rapor-token, authorization, apikey, x-client-info",
@@ -52,7 +52,7 @@ Deno.serve(async (req) => {
     if (body.action === "upload") {
       if (!["datang", "pulang"].includes(body.jenis)) return json({ error: "jenis tidak valid" }, 400);
       const bin = Uint8Array.from(atob(String(body.foto ?? "")), (c) => c.charCodeAt(0));
-      if (bin.length < 1000 || bin.length > MAX) return json({ error: "Ukuran foto tidak wajar" }, 400);
+      if (bin.length < 1000 || bin.length > MAX) return json({ error: "Ukuran foto harus 1 KB – 20 KB" }, 400);
       if (bin[0] !== 0xff || bin[1] !== 0xd8 || bin[2] !== 0xff) return json({ error: "Bukan file JPEG" }, 400);
       const tgl = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }); // tanggal server, bukan klien
       const path = `${me.id}/${tgl}-${body.jenis}.jpg`;

@@ -198,6 +198,25 @@ async function refresh() {
   addEventListener("touchend", selesai); addEventListener("touchcancel", selesai);
 })();
 
+
+/* ---------- Kompres foto presensi (maks. FOTO_MAX_KB) ---------- */
+const FOTO_MAX_KB = 20;
+function kompres(v, c, label) {
+  const g = c.getContext("2d"), batas = FOTO_MAX_KB * 1024, rasio = v.videoHeight / v.videoWidth;
+  for (const w of [480, 400, 320, 260, 200, 160]) {
+    c.width = w; c.height = Math.round(w * rasio);
+    g.drawImage(v, 0, 0, c.width, c.height);
+    const fs = Math.max(8, Math.round(w / 34)), bar = fs * 2.2;
+    g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(0, c.height - bar, c.width, bar);
+    g.fillStyle = "#fff"; g.font = fs + "px sans-serif"; g.fillText(label, 4, c.height - bar / 2 + fs / 3, c.width - 8);
+    for (let q = 0.7; q >= 0.3; q -= 0.1) {
+      const b64 = c.toDataURL("image/jpeg", q).split(",")[1];
+      if (Math.floor(b64.length * 3 / 4) <= batas) return b64;
+    }
+  }
+  return null;
+}
+
 /* ---------- Presensi ---------- */
 async function presensi() {
   const now = new Date(), tgl = ymd(now);
@@ -227,10 +246,9 @@ async function presensi() {
     if (!pos) return toast("Lokasi belum didapat.", true);
     if (jarak(cfg.lat, cfg.lng, pos.latitude, pos.longitude) > cfg.radius_m) return toast("Anda di luar radius presensi.", true);
     const v = $("#vid"), c = $("#cv"); if (!v.videoWidth) return toast("Kamera belum siap.", true);
-    c.width = v.videoWidth; c.height = v.videoHeight; const g = c.getContext("2d"); g.drawImage(v, 0, 0);
-    g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(0, c.height - 34, c.width, 34); g.fillStyle = "#fff"; g.font = "16px sans-serif";
-    g.fillText(`${me.nama} · ${tgl} ${hhmm(new Date())} · ${pos.latitude.toFixed(5)},${pos.longitude.toFixed(5)}`, 8, c.height - 12);
-    const b64 = c.toDataURL("image/jpeg", .8).split(",")[1];
+    const label = `${me.nama} · ${tgl} ${hhmm(new Date())} · ${pos.latitude.toFixed(5)},${pos.longitude.toFixed(5)}`;
+    const b64 = kompres(v, c, label);
+    if (!b64) return toast("Foto tidak bisa diperkecil hingga " + FOTO_MAX_KB + " KB. Coba lagi.", true);
     $("#snap").disabled = true;
     let path;
     try { path = (await foto({ action: "upload", jenis, foto: b64 })).path; }
