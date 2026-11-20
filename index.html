@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Presensi Guru & Karyawan</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<style>
+:root{--ink:#14302c;--paper:#f6f7f4;--card:#fff;--line:#d9dfd9;--main:#0f6b5c;--warn:#b4570a;--bad:#a32424;--ok:#17743a;--mut:#5d6f6a;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--ink:#e8efec;--paper:#0f1a18;--card:#16241f;--line:#2b3d37;--main:#3fb59f;--warn:#e19a4b;--bad:#ef7b7b;--ok:#5bc788;--mut:#9ab0a9;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+main{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:1.4rem;margin:0}h2{font-size:1.1rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+label{display:block;font-size:.85rem;color:var(--mut);margin:10px 0 3px}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--ink);font:inherit}
+button{padding:10px 16px;border:0;border-radius:8px;background:var(--main);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+button.alt{background:transparent;color:var(--main);border:1px solid var(--main)}
+button:disabled{opacity:.5}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--warn);outline-offset:2px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row>*{flex:1}
+.tabs{display:flex;gap:6px;overflow-x:auto;margin:12px 0}.tabs button{flex:none}
+.clock{font-size:2.6rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+.mut{color:var(--mut);font-size:.9rem}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+video,canvas,img.prev{width:100%;border-radius:10px;background:#000;aspect-ratio:3/4;object-fit:cover}
+.wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+#msg{position:sticky;top:8px;z-index:5}.m{padding:10px 14px;border-radius:8px;margin-bottom:8px;background:var(--ink);color:var(--paper)}
+</style>
+</head>
+<body>
+<main>
+<div id="msg" role="status"></div>
+<div id="app"></div>
+</main>
+<script>
+const SUPABASE_URL = "https://nrwexyezcbmsokelgkmp.supabase.co";
+const SUPABASE_KEY = "sb_publishable_eKH7VdAJy17PjYuTL-3X9w_pKViejAd";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const $ = s => document.querySelector(s);
+const HARI = ["", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"];
+let me = null, cfg = null, stream = null, tab = "presensi", timer = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function toast(t, bad) { const d = document.createElement("div"); d.className = "m"; if (bad) d.style.background = "var(--bad)"; d.textContent = t; $("#msg").append(d); setTimeout(() => d.remove(), 5000); }
+const wib = d => new Date(d.toLocaleString("en-US", { timeZone: "Asia/Jakarta" }));
+const ymd = d => { const w = wib(d); return `${w.getFullYear()}-${String(w.getMonth() + 1).padStart(2, "0")}-${String(w.getDate()).padStart(2, "0")}`; };
+const hhmm = d => wib(d).toTimeString().slice(0, 8);
+const hariKe = d => wib(d).getDay() || 7;
+function jarak(a, b, c, d) { const r = x => x * Math.PI / 180, h = Math.sin(r(c - a) / 2) ** 2 + Math.cos(r(a)) * Math.cos(r(c)) * Math.sin(r(d - b) / 2) ** 2; return Math.round(12742000 * Math.asin(Math.sqrt(h))); }
+function csv(text) {
+  const lines = text.replace(/^\uFEFF/, "").trim().split(/\r?\n/); const sep = lines[0].includes(";") ? ";" : ",";
+  const head = lines[0].split(sep).map(h => h.trim().toLowerCase());
+  return lines.slice(1).filter(l => l.trim()).map(l => { const v = l.split(sep); return Object.fromEntries(head.map((h, i) => [h, (v[i] || "").trim().replace(/^"|"$/g, "")])); });
+}
+const readFile = f => new Promise(r => { const x = new FileReader(); x.onload = () => r(x.result); x.readAsText(f); });
+
+/* ---------- Login ---------- */
+async function init() {
+  const { data } = await sb.auth.getSession();
+  data.session ? await masuk(data.session.user) : loginView();
+}
+function loginView() {
+  $("#app").innerHTML = `<div class="card"><h1>Presensi Sekolah</h1><p class="mut">Masuk dengan akun yang diberikan admin.</p>
+  <label for="em">Email</label><input id="em" type="email" autocomplete="username">
+  <label for="pw">Kata sandi</label><input id="pw" type="password" autocomplete="current-password">
+  <p><button id="go">Masuk</button></p></div>`;
+  $("#go").onclick = async () => {
+    const { data, error } = await sb.auth.signInWithPassword({ email: $("#em").value.trim(), password: $("#pw").value });
+    if (error) return toast("Email atau kata sandi salah.", true);
+    masuk(data.user);
+  };
+}
+async function masuk(user) {
+  const { data } = await sb.from("pegawai").select("*").eq("email", user.email).maybeSingle();
+  if (!data) { toast("Email belum terdaftar sebagai pegawai. Hubungi admin.", true); await sb.auth.signOut(); return loginView(); }
+  me = data; cfg = (await sb.from("pengaturan").select("*").eq("id", 1).single()).data;
+  shell();
+}
+function shell() {
+  const tabs = [["presensi", "Presensi"], ["riwayat", "Riwayat"]];
+  if (me.role === "admin") tabs.push(["rekap", "Rekap"], ["lokasi", "Lokasi"], ["jadwal", "Jadwal"], ["guru", "Data guru"]);
+  $("#app").innerHTML = `<div class="row"><div><h1>${esc(me.nama)}</h1><div class="mut">${esc(me.jabatan || me.tipe)}</div></div><div style="flex:none"><button class="alt" id="out">Keluar</button></div></div>
+  <div class="tabs">${tabs.map(t => `<button class="${t[0] === tab ? "" : "alt"}" data-t="${t[0]}">${t[1]}</button>`).join("")}</div><div id="view"></div>`;
+  $("#out").onclick = async () => { await sb.auth.signOut(); stop(); me = null; loginView(); };
+  document.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { tab = b.dataset.t; stop(); shell(); });
+  ({ presensi, riwayat, rekap, lokasi, jadwal, guru })[tab]();
+}
+function stop() { clearInterval(timer); stream?.getTracks().forEach(t => t.stop()); stream = null; }
+
+/* ---------- Presensi ---------- */
+async function presensi() {
+  const now = new Date(), tgl = ymd(now);
+  const [{ data: hr }, { data: jd }] = await Promise.all([
+    sb.from("presensi").select("*").eq("pegawai_id", me.id).eq("tanggal", tgl),
+    sb.from("jadwal").select("*").eq("pegawai_id", me.id).eq("hari", hariKe(now)).maybeSingle()]);
+  const datang = hr.find(x => x.jenis === "datang"), pulang = hr.find(x => x.jenis === "pulang");
+  const jenis = !datang ? "datang" : !pulang ? "pulang" : null;
+  $("#view").innerHTML = `<div class="card"><div class="clock" id="clk"></div>
+  <div class="mut">${HARI[hariKe(now)]}, ${tgl}</div>
+  <p>${jd ? `Jadwal hari ini: <b>${jd.jam_masuk.slice(0, 5)}–${jd.jam_pulang.slice(0, 5)}</b>` : `<span class="warn">Tidak ada jadwal hari ini.</span>`}</p>
+  <div class="mut">Datang: ${datang ? `${hhmm(new Date(datang.waktu))} (${esc(datang.status)})` : "belum"} · Pulang: ${pulang ? `${hhmm(new Date(pulang.waktu))} (${esc(pulang.status)})` : "belum"}</div></div>
+  ${jenis ? `<div class="card"><h2>Foto presensi ${jenis}</h2><video id="vid" autoplay playsinline muted></video><canvas id="cv" hidden></canvas>
+  <p id="loc" class="mut">Mencari lokasi…</p><div class="row"><button id="snap">Ambil foto & kirim</button></div></div>`
+      : `<div class="card ok">Presensi hari ini sudah lengkap. Terima kasih.</div>`}`;
+  timer = setInterval(() => { const e = $("#clk"); if (e) e.textContent = hhmm(new Date()); }, 1000); $("#clk").textContent = hhmm(new Date());
+  if (!jenis) return;
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 640 }, audio: false }); $("#vid").srcObject = stream; }
+  catch { toast("Kamera tidak bisa diakses. Izinkan kamera di pengaturan browser.", true); }
+  let pos = null;
+  navigator.geolocation.watchPosition(p => {
+    pos = p.coords; const d = jarak(cfg.lat, cfg.lng, pos.latitude, pos.longitude), ok = d <= cfg.radius_m;
+    $("#loc").innerHTML = `<span class="${ok ? "ok" : "bad"}">${ok ? "Di dalam area" : "Di luar area"}</span> — ${d} m dari ${esc(cfg.nama_lokasi)} (batas ${cfg.radius_m} m, akurasi ±${Math.round(pos.accuracy)} m)`;
+  }, () => { $("#loc").innerHTML = `<span class="bad">Lokasi tidak aktif. Aktifkan GPS dan izinkan akses lokasi.</span>`; }, { enableHighAccuracy: true });
+  $("#snap").onclick = async () => {
+    if (!pos) return toast("Lokasi belum didapat.", true);
+    if (jarak(cfg.lat, cfg.lng, pos.latitude, pos.longitude) > cfg.radius_m) return toast("Anda di luar radius presensi.", true);
+    const v = $("#vid"), c = $("#cv"); if (!v.videoWidth) return toast("Kamera belum siap.", true);
+    c.width = v.videoWidth; c.height = v.videoHeight; const g = c.getContext("2d"); g.drawImage(v, 0, 0);
+    g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(0, c.height - 34, c.width, 34); g.fillStyle = "#fff"; g.font = "16px sans-serif";
+    g.fillText(`${me.nama} · ${tgl} ${hhmm(new Date())} · ${pos.latitude.toFixed(5)},${pos.longitude.toFixed(5)}`, 8, c.height - 12);
+    const blob = await new Promise(r => c.toBlob(r, "image/jpeg", .8));
+    $("#snap").disabled = true;
+    const path = `${me.id}/${tgl}-${jenis}.jpg`;
+    const up = await sb.storage.from("selfie").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
+    if (up.error) { $("#snap").disabled = false; return toast("Gagal unggah foto: " + up.error.message, true); }
+    const t = hhmm(new Date()); let status = "tepat waktu";
+    if (jd) {
+      if (jenis === "datang") { const [h, m] = jd.jam_masuk.split(":"); const lim = (+h * 60 + +m + cfg.toleransi_menit) * 60; const [a, b, s] = t.split(":"); if (+a * 3600 + +b * 60 + +s > lim + 59) status = "terlambat"; }
+      else if (t < jd.jam_pulang) status = "pulang cepat";
+    } else status = "tanpa jadwal";
+    const { error } = await sb.from("presensi").insert({ pegawai_id: me.id, tanggal: tgl, jenis, lat: pos.latitude, lng: pos.longitude, foto_path: path, status });
+    if (error) { $("#snap").disabled = false; return toast(error.message, true); }
+    toast(`Presensi ${jenis} tercatat (${status}).`); stop(); shell();
+  };
+}
+
+/* ---------- Riwayat & Rekap ---------- */
+async function riwayat() {
+  const { data } = await sb.from("presensi").select("*").eq("pegawai_id", me.id).order("waktu", { ascending: false }).limit(60);
+  $("#view").innerHTML = `<div class="card wrap"><table><tr><th>Tanggal</th><th>Jenis</th><th>Jam</th><th>Status</th><th>Jarak</th></tr>${data.map(r => `<tr><td>${r.tanggal}</td><td>${r.jenis}</td><td>${hhmm(new Date(r.waktu))}</td><td class="${r.status === "terlambat" ? "warn" : ""}">${esc(r.status)}</td><td>${r.jarak_m} m</td></tr>`).join("") || `<tr><td>Belum ada data.</td></tr>`}</table></div>`;
+}
+async function rekap() {
+  $("#view").innerHTML = `<div class="card"><div class="row"><input type="date" id="d" value="${ymd(new Date())}"><button id="cari" style="flex:none">Tampilkan</button></div><div class="wrap" id="hasil"></div></div>`;
+  const load = async () => {
+    const d = $("#d").value;
+    const [{ data: pg }, { data: pr }] = await Promise.all([sb.from("pegawai").select("id,nip,nama").eq("aktif", true).order("nama"), sb.from("presensi").select("*").eq("tanggal", d)]);
+    const rows = await Promise.all(pg.map(async p => {
+      const f = j => pr.find(x => x.pegawai_id === p.id && x.jenis === j);
+      const cell = async r => { if (!r) return `<td class="bad">—</td><td></td>`; const { data: u } = await sb.storage.from("selfie").createSignedUrl(r.foto_path, 3600); return `<td>${hhmm(new Date(r.waktu))} <span class="${r.status === "terlambat" ? "warn" : "mut"}">${esc(r.status)}</span></td><td><a href="${u?.signedUrl}" target="_blank" rel="noopener">foto</a></td>`; };
+      return `<tr><td>${esc(p.nama)}</td>${await cell(f("datang"))}${await cell(f("pulang"))}</tr>`;
+    }));
+    $("#hasil").innerHTML = `<table><tr><th>Nama</th><th>Datang</th><th></th><th>Pulang</th><th></th></tr>${rows.join("")}</table>`;
+  };
+  $("#cari").onclick = load; load();
+}
+
+/* ---------- Admin: lokasi ---------- */
+function lokasi() {
+  $("#view").innerHTML = `<div class="card"><h2>Titik lokasi & radius absen</h2>
+  <label>Nama lokasi</label><input id="nm" value="${esc(cfg.nama_lokasi)}">
+  <div class="row"><div><label>Latitude</label><input id="la" type="number" step="any" value="${cfg.lat}"></div><div><label>Longitude</label><input id="lo" type="number" step="any" value="${cfg.lng}"></div></div>
+  <div class="row"><div><label>Radius (meter)</label><input id="rd" type="number" min="10" value="${cfg.radius_m}"></div><div><label>Toleransi terlambat (menit)</label><input id="tl" type="number" min="0" value="${cfg.toleransi_menit}"></div></div>
+  <p class="row"><button class="alt" id="gps">Pakai lokasi saya sekarang</button><button id="sv">Simpan</button></p>
+  <p class="mut"><a id="mp" target="_blank" rel="noopener">Lihat titik di peta</a></p></div>`;
+  const mp = () => $("#mp").href = `https://www.google.com/maps?q=${$("#la").value},${$("#lo").value}`; mp();
+  $("#gps").onclick = () => navigator.geolocation.getCurrentPosition(p => { $("#la").value = p.coords.latitude; $("#lo").value = p.coords.longitude; mp(); }, () => toast("Lokasi tidak bisa diakses.", true), { enableHighAccuracy: true });
+  $("#sv").onclick = async () => {
+    const v = { nama_lokasi: $("#nm").value, lat: +$("#la").value, lng: +$("#lo").value, radius_m: +$("#rd").value, toleransi_menit: +$("#tl").value };
+    const { error } = await sb.from("pengaturan").update(v).eq("id", 1);
+    error ? toast(error.message, true) : (Object.assign(cfg, v), toast("Lokasi tersimpan."));
+  };
+}
+
+/* ---------- Admin: jadwal ---------- */
+async function jadwal() {
+  const { data } = await sb.from("jadwal").select("hari,jam_masuk,jam_pulang,pegawai(nama,nip)").order("hari");
+  $("#view").innerHTML = `<div class="card"><h2>Unggah jadwal kerja</h2><p class="mut">File CSV dengan kolom: <b>nip, hari, jam_masuk, jam_pulang</b>. Hari bisa angka 1–7 atau nama (Senin…). Jadwal lama untuk NIP yang sama akan diganti.</p>
+  <input type="file" id="f" accept=".csv,.txt"><p><button id="up">Unggah jadwal</button></p></div>
+  <div class="card wrap"><table><tr><th>Nama</th><th>Hari</th><th>Masuk</th><th>Pulang</th></tr>${data.map(r => `<tr><td>${esc(r.pegawai?.nama)}</td><td>${HARI[r.hari]}</td><td>${r.jam_masuk.slice(0, 5)}</td><td>${r.jam_pulang.slice(0, 5)}</td></tr>`).join("")}</table></div>`;
+  $("#up").onclick = async () => {
+    const f = $("#f").files[0]; if (!f) return toast("Pilih file CSV dulu.", true);
+    const rows = csv(await readFile(f)); const { data: pg } = await sb.from("pegawai").select("id,nip");
+    const map = Object.fromEntries(pg.map(p => [p.nip, p.id])), out = [], miss = new Set();
+    for (const r of rows) {
+      const id = map[r.nip]; if (!id) { miss.add(r.nip); continue; }
+      let h = parseInt(r.hari) || HARI.findIndex(n => n.toLowerCase() === (r.hari || "").toLowerCase());
+      if (h < 1 || h > 7) continue;
+      out.push({ pegawai_id: id, hari: h, jam_masuk: r.jam_masuk, jam_pulang: r.jam_pulang });
+    }
+    const ids = [...new Set(out.map(o => o.pegawai_id))];
+    if (ids.length) await sb.from("jadwal").delete().in("pegawai_id", ids);
+    const { error } = await sb.from("jadwal").insert(out);
+    if (error) return toast(error.message, true);
+    toast(`${out.length} jadwal tersimpan.` + (miss.size ? ` NIP tidak ditemukan: ${[...miss].join(", ")}` : "")); jadwal();
+  };
+}
+
+/* ---------- Admin: data guru (sinkron e-Rapor) ---------- */
+async function guru() {
+  const { data } = await sb.from("pegawai").select("*").order("nama");
+  $("#view").innerHTML = `<div class="card"><h2>Sinkron data guru dari e-Rapor</h2>
+  <p class="mut">Pilih salah satu. Kolom: <b>nip, nama, email, jabatan, tipe</b> (guru/karyawan). Data dicocokkan lewat NIP; yang sudah ada diperbarui, yang baru ditambahkan.</p>
+  <label>Dari file ekspor e-Rapor (CSV)</label><input type="file" id="f" accept=".csv,.txt"><p><button id="imp">Sinkron dari file</button></p>
+  <hr style="border:0;border-top:1px solid var(--line);margin:14px 0"><h2>Langsung dari e-Rapor</h2>
+  <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="ak" style="width:auto"> Buat akun login untuk guru baru</label>
+  <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="nk" style="width:auto"> Nonaktifkan guru yang sudah tidak ada di e-Rapor</label>
+  <p class="row"><button class="alt" id="plan">Cek dulu</button><button id="api">Sinkron dari e-Rapor</button></p><pre id="hs" class="mut" style="white-space:pre-wrap"></pre>
+</div>
+  <div class="card wrap"><h2>${data.length} pegawai</h2><table><tr><th>NIP</th><th>Nama</th><th>Email</th><th>Tipe</th><th>Peran</th></tr>${data.map(p => `<tr><td>${esc(p.nip)}</td><td>${esc(p.nama)}</td><td>${esc(p.email)}</td><td>${esc(p.tipe)}</td><td>${esc(p.role)}</td></tr>`).join("")}</table></div>`;
+  const simpan = async rows => {
+    const out = rows.filter(r => r.nip && r.nama).map(r => ({ nip: String(r.nip), nama: r.nama, email: (r.email || "").toLowerCase() || null, jabatan: r.jabatan || null, tipe: (r.tipe || "guru").toLowerCase(), sumber: "erapor", updated_at: new Date().toISOString() }));
+    if (!out.length) return toast("Tidak ada baris valid (butuh kolom nip dan nama).", true);
+    const { error } = await sb.from("pegawai").upsert(out, { onConflict: "nip" });
+    error ? toast(error.message, true) : (toast(`${out.length} data tersinkron.`), guru());
+  };
+  $("#imp").onclick = async () => { const f = $("#f").files[0]; f ? simpan(csv(await readFile(f))) : toast("Pilih file dulu.", true); };
+  const jalan = action => async () => {
+    $("#hs").textContent = "Memproses…";
+    const { data: d, error } = await sb.functions.invoke("sync-erapor", { body: { action, buat_akun: $("#ak").checked, nonaktifkan: $("#nk").checked } });
+    let r = d; if (error) { try { r = await error.context.json(); } catch { r = { error: error.message }; } }
+    if (r?.error) { $("#hs").textContent = ""; return toast(r.error, true); }
+    $("#hs").textContent = JSON.stringify(r, null, 2);
+    if (action === "apply") { toast("Sinkron e-Rapor selesai."); setTimeout(guru, 2500); }
+  };
+  $("#plan").onclick = jalan("plan"); $("#api").onclick = jalan("apply");
+}
+init();
+</script>
+</body>
+</html>
