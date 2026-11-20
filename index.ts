@@ -67,7 +67,7 @@ const butuhAdmin = (me: { role?: string }) => { if (me.role !== "admin") throw n
 
 // ---------- Pengaturan jadwal (libur, force majeure, jam staf, acuan tes/pasca tes/piket) ----------
 type Peng = {
-  staf_masuk: string; staf_pulang: string;
+  staf: Record<string, { masuk: string; pulang: string }>; // jam staf per hari: "1" (Senin) ... "6" (Sabtu); kosong = tidak bekerja
   tes: { dari: string; sampai: string };
   pasca: { masuk: string; pulang: string; dari: string; sampai: string };
   piket: { dari: string; sampai: string; masuk: string; pulang: string };
@@ -84,7 +84,12 @@ type Ef = { tipe: "libur" | "fm" | "kerja" | "tanpa"; ket?: string; masuk?: stri
 function normPeng(v: any): Peng {
   const p = v ?? {};
   return {
-    staf_masuk: jamHM(p.staf_masuk) || "07:00", staf_pulang: jamHM(p.staf_pulang) || "14:00",
+    staf: Object.fromEntries(["1", "2", "3", "4", "5", "6"].map((h) => {
+      const x = p.staf?.[h];
+      if (!x) return [h, { masuk: jamHM(p.staf_masuk) || "07:00", pulang: jamHM(p.staf_pulang) || "14:00" }]; // data lama: satu jam untuk semua hari
+      const m = jamHM(x.masuk), pl = jamHM(x.pulang);
+      return [h, m && pl ? { masuk: m, pulang: pl } : { masuk: "", pulang: "" }];
+    })),
     tes: { dari: tg(p.tes?.dari), sampai: tg(p.tes?.sampai) },
     pasca: { masuk: jamHM(p.pasca?.masuk) || "07:00", pulang: jamHM(p.pasca?.pulang) || "14:00", dari: tg(p.pasca?.dari), sampai: tg(p.pasca?.sampai) },
     piket: { dari: tg(p.piket?.dari), sampai: tg(p.piket?.sampai), masuk: jamHM(p.piket?.masuk), pulang: jamHM(p.piket?.pulang) },
@@ -149,7 +154,8 @@ function efektif(c: Ctx, id: string, role: string, rows: Jd[], tanggal: string, 
   const reg = rows.filter((r) => r.jenis === "reguler"), tes = rows.filter((r) => r.jenis === "tes");
   const stf = c.staf.includes(id);
   // Jam staf berlaku Senin-Sabtu.
-  const stafEx = hari <= 6 ? { masuk: c.peng.staf_masuk, pulang: c.peng.staf_pulang, sumber: stf ? "Jam staf (tugas tambahan)" : "Jam staf" } : null;
+  const sj = hari <= 6 ? c.peng.staf[String(hari)] : null; // jam staf hari itu (kosong = tidak bekerja)
+  const stafEx = sj && sj.masuk && sj.pulang ? { masuk: sj.masuk, pulang: sj.pulang, sumber: stf ? "Jam staf (tugas tambahan)" : "Jam staf" } : null;
   const dari = (r: Jd | undefined, sumber: string) => (r ? { masuk: r.jam_masuk.slice(0, 5), pulang: r.jam_pulang.slice(0, 5), sumber } : null);
   let ex: { masuk: string; pulang: string; sumber: string } | null = null;
   if (md === "piket") {
@@ -297,7 +303,11 @@ Deno.serve(async (req) => {
           cekBentrok(p);
           if (p.piket.dari && (!p.piket.masuk || !p.piket.pulang || p.piket.pulang <= p.piket.masuk)) throw new Tolak("Isi jam mulai dan jam akhir piket (akhir harus setelah mulai)");
           if (p.pasca.pulang <= p.pasca.masuk) throw new Tolak("Jam pulang pasca tes harus setelah jam masuk");
-          if (p.staf_pulang <= p.staf_masuk) throw new Tolak("Jam pulang staf harus setelah jam masuk");
+          for (const h of ["1", "2", "3", "4", "5", "6"]) {
+            const x = p.staf[h], nm = ["", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"][+h];
+            if (!!x.masuk !== !!x.pulang) throw new Tolak(`Jam staf ${nm}: isi jam masuk dan jam pulang, atau kosongkan keduanya (libur)`);
+            if (x.masuk && x.pulang <= x.masuk) throw new Tolak(`Jam staf ${nm}: jam pulang harus setelah jam masuk`);
+          }
           await simpanCfg("pengaturan", p);
         } else if (body.key === "libur") {
           const l = [...new Set((Array.isArray(v) ? v : []).filter(tglOk).map(String))].sort().slice(0, 600);

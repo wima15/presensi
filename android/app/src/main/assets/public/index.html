@@ -508,7 +508,7 @@ function bentrokPeng(P) {
   return m;
 }
 const bacaPeng = () => ({
-  staf_masuk: $("#sm").value, staf_pulang: $("#sp").value,
+  staf: Object.fromEntries([1, 2, 3, 4, 5, 6].map(h => [h, { masuk: $("#sm" + h).value, pulang: $("#sp" + h).value }])),
   tes: { dari: $("#a2f").value, sampai: $("#a2t").value },
   pasca: { masuk: $("#a3i").value, pulang: $("#a3o").value, dari: $("#a3f").value, sampai: $("#a3t").value },
   piket: { dari: $("#a4f").value, sampai: $("#a4t").value, masuk: $("#a4i").value, pulang: $("#a4o").value },
@@ -528,8 +528,8 @@ async function atur() {
   const P = A.pengaturan;
   $("#view").innerHTML = `
   <div class="card"><h2>Jam kerja staf</h2>
-    <div class="row"><div><label for="sm">Jam masuk staf</label><input id="sm" type="time" value="${P.staf_masuk}"></div><div><label for="sp">Jam pulang staf</label><input id="sp" type="time" value="${P.staf_pulang}"></div></div>
-    <p class="mut">Dipakai staf, kepala sekolah, dan admin yang tidak punya jadwal mengajar, serta guru yang dicentang bertugas tambahan staf (Senin–Sabtu). Simpan lewat tombol di bagian Acuan jadwal.</p></div>
+    ${[1, 2, 3, 4, 5, 6].map(h => `<div class="row"><div style="flex:.6"><label for="sm${h}">${HARI[h]} · masuk</label><input id="sm${h}" type="time" value="${P.staf[h].masuk}"></div><div><label for="sp${h}">pulang</label><input id="sp${h}" type="time" value="${P.staf[h].pulang}"></div></div>`).join("")}
+    <p class="mut">Jam masuk dan pulang staf diatur per hari, Senin–Sabtu. Kosongkan jam masuk dan pulang pada hari yang tidak bekerja (misalnya Sabtu). Dipakai staf, kepala sekolah, dan admin yang tidak punya jadwal mengajar, serta guru yang dicentang bertugas tambahan staf. Simpan lewat tombol di bagian Acuan jadwal.</p></div>
   <div class="card"><h2>Hari libur</h2><div class="row"><input id="hd" type="date"><button id="ha" style="flex:none">Tambah libur</button></div><div id="hl"></div>
     <p class="mut">Pada tanggal libur tidak ada jadwal dan presensi tidak diperlukan.</p></div>
   <div class="card"><h2>Force Majeure</h2>
@@ -632,7 +632,7 @@ async function cek() {
     add(okp ? "ok" : "warn", okp ? `Piket berlaku ${rg(P.piket.dari, P.piket.sampai)}, jam ${P.piket.masuk}–${P.piket.pulang}.` : "Jadwal piket sudah diunggah, tetapi tanggal atau jam piket belum benar (Pengaturan).");
     if ((A.piket.belum || []).length) add("warn", `${A.piket.belum.length} nama piket belum cocok dengan data pegawai: ${esc(A.piket.belum.slice(0, 6).join(", "))}.`);
   } else if (P.piket.dari && P.piket.sampai) add("warn", "Tanggal piket sudah diisi, tetapi jadwal piket belum diunggah. Tanggal itu belum diperlakukan sebagai piket.");
-  if (A.staf.length) add("ok", `${A.staf.length} guru bertugas tambahan staf memakai jam staf ${P.staf_masuk}–${P.staf_pulang}.`);
+  if (A.staf.length) add("ok", `${A.staf.length} guru bertugas tambahan staf memakai jam staf per hari.`);
   add("ok", `${A.libur.length} hari libur, ${A.fm.length} tanggal force majeure terdaftar.`);
   $("#view").innerHTML = `<div class="card"><h2>Hasil cek</h2>${ps.join("")}</div>
   <div class="card"><h2>Jadwal pada tanggal tertentu</h2><div class="row"><input type="date" id="ctg" value="${ymd(new Date())}"><button id="cgo" style="flex:none">Tampilkan</button></div><div class="wrap" id="chs"></div></div>
