@@ -29,7 +29,13 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: android-actions/setup-android@v3
+      # Runner ubuntu-latest sudah membawa Android SDK; cukup terima lisensi & pastikan platform 36 ada.
+      - name: Siapkan Android SDK
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          set +o pipefail
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-36" "build-tools;36.0.0" > /dev/null || true
 
       - uses: gradle/actions/setup-gradle@v4
 
