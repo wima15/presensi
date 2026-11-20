@@ -52,22 +52,59 @@ h3{font-size:.98rem;margin:16px 0 4px}details summary{cursor:pointer;font-weight
 // Semua data presensi (lokasi, jadwal, log, foto) disimpan di project presensi lewat Edge Function.
 const SUPABASE_URL = "https://iejpwxmcqwecejsrezry.supabase.co";
 const SUPABASE_KEY = "sb_publishable_dZfvfiSsA-JAndPn172VSg_sq_zRWqS";
+// ---------- Masuk otomatis dari PDP (SSO) ----------
+// Dibuka dari Menu Utama PDP: token sesi PDP dibawa lewat bagian # pada URL (#sso=...&from=...), lalu
+// dihapus dari alamat. Akun e-Rapor/PDP sama dengan akun presensi, jadi token itu dipakai langsung
+// (tanpa login ulang). Token TIDAK disimpan permanen dan tidak diperbarui di sini (supaya tidak
+// bentrok dengan sesi PDP); bila habis, pengguna dibawa ke PDP untuk membukanya lagi dengan token baru.
+// Tanpa #sso= (mis. APK Presensi atau buka langsung), login memakai email + kata sandi seperti biasa.
+const PDP_PORTAL = "https://smkwima.github.io/pdp/portal.html";
+const SSO = (() => {
+  try {
+    const decode = t => JSON.parse(decodeURIComponent(escape(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")))));
+    let tk = "", dari = "";
+    const h = new URLSearchParams(location.hash.replace(/^#/, ""));
+    if (h.get("sso")) {
+      tk = h.get("sso"); dari = h.get("from") || "";
+      try { sessionStorage.setItem("pdp_sso", JSON.stringify({ tk, dari })); } catch {}
+      history.replaceState(null, "", location.pathname + location.search); // token tidak tinggal di alamat
+    } else {
+      try { const o = JSON.parse(sessionStorage.getItem("pdp_sso") || "null"); if (o) { tk = o.tk; dari = o.dari || ""; } } catch {}
+    }
+    if (!tk) return null;
+    const p = decode(tk);
+    if (!p.sub || !p.exp || !String(p.iss || "").startsWith("https://iejpwxmcqwecejsrezry.supabase.co")) return null; // harus token e-Rapor/PDP
+    let balik = PDP_PORTAL;
+    try { const u = new URL(dari); if (u.origin === "https://smkwima.github.io") balik = u.origin + u.pathname; } catch {}
+    return { tk, sub: p.sub, email: p.email || "", exp: p.exp * 1000, balik };
+  } catch { return null; }
+})();
+// Sesi saat ini: mode SSO memakai token dari PDP selama belum habis; mode biasa memakai sesi Supabase.
+async function sesi() {
+  if (SSO) return Date.now() < SSO.exp - 15000 ? { access_token: SSO.tk, user: { id: SSO.sub, email: SSO.email } } : null;
+  return (await sb.auth.getSession()).data.session;
+}
+const kePdp = lanjut => { try { sessionStorage.removeItem("pdp_sso"); } catch {} location.href = SSO.balik + (lanjut ? "?buka=presensi" : ""); };
+const LBL_KELUAR = SSO ? "Kembali ke PDP" : "Keluar";
+
 // Sesi login disimpan permanen (sekali masuk, tetap masuk sampai menekan "Keluar").
 // Di aplikasi Android dipakai penyimpanan native (Preferences) yang lebih awet daripada localStorage WebView.
 const Pref = window.Capacitor?.Plugins?.Preferences;
-const authOpts = { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false };
-if (Pref) authOpts.storage = {
+const authOpts = SSO ? { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } : { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false };
+if (Pref && !SSO) authOpts.storage = {
   getItem: async k => (await Pref.get({ key: k })).value,
   setItem: (k, v) => Pref.set({ key: k, value: v }),
   removeItem: k => Pref.remove({ key: k }),
 };
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: authOpts });
+// Mode SSO: setiap permintaan ke e-Rapor (baca profil pegawai) membawa token PDP.
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, SSO ? { auth: authOpts, global: { headers: { Authorization: "Bearer " + SSO.tk } } } : { auth: authOpts });
 // Database presensi ada di project Supabase TERPISAH (nrwexyezcbmsokelgkmp). Browser tidak memegang
 // kunci project itu: semua baca/tulis lewat Edge Function yang memverifikasi sesi login e-Rapor.
 const API_FN = "https://nrwexyezcbmsokelgkmp.supabase.co/functions/v1/presensi-api";
 async function api(action, body = {}) {
-  const { data } = await sb.auth.getSession();
-  const r = await fetch(API_FN, { method: "POST", headers: { "Content-Type": "application/json", "x-rapor-token": data.session?.access_token || "" }, body: JSON.stringify({ action, ...body }) });
+  const ss = await sesi();
+  if (SSO && !ss) { sesiHabisView(); throw new Error("Sesi dari PDP sudah habis. Perbarui dari PDP."); }
+  const r = await fetch(API_FN, { method: "POST", headers: { "Content-Type": "application/json", "x-rapor-token": ss?.access_token || "" }, body: JSON.stringify({ action, ...body }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || "Server presensi menolak (" + r.status + ")");
   return j;
@@ -87,14 +124,24 @@ function jarak(a, b, c, d) { const r = x => x * Math.PI / 180, h = Math.sin(r(c 
 /* ---------- Login ---------- */
 async function init() {
   history.replaceState({ d: 0, t: "presensi" }, "");
-  const { data } = await sb.auth.getSession();
-  data.session ? await masuk(data.session.user) : loginView();
+  const ss = await sesi();
+  ss ? await masuk(ss.user) : loginView();
 }
 // Sesi hanya berakhir bila pengguna menekan Keluar (atau server menolak refresh token: akun dihapus / sandi diganti).
 sb.auth.onAuthStateChange(ev => {
   if (ev === "SIGNED_OUT" && !keluarManual && me) { stop(); me = null; toast("Sesi berakhir, silakan masuk lagi.", true); loginView(); }
 });
+// Mode SSO: cek berkala; begitu token PDP habis (dan kamera tidak sedang dipakai) tampilkan ajakan memperbarui.
+if (SSO) setInterval(() => { if (me && !stream && Date.now() >= SSO.exp - 15000) sesiHabisView(); }, 20000);
+// Mode SSO: token PDP habis. Tidak ada form login; cukup buka lagi dari PDP.
+function sesiHabisView() {
+  stop(); me = null;
+  $("#app").innerHTML = `<div class="card"><h1>Sesi dari PDP habis</h1><p class="mut">Untuk keamanan, masuk otomatis dari PDP berlaku terbatas. Perbarui dari PDP, Anda tidak perlu login ulang.</p>
+  <p><button id="lagi">Perbarui dari PDP</button></p></div>`;
+  $("#lagi").onclick = () => kePdp(true);
+}
 function loginView() {
+  if (SSO) return sesiHabisView();
   $("#app").innerHTML = `<div class="card"><h1>Presensi Sekolah</h1><p class="mut">Masuk dengan email dan kata sandi akun e-Rapor/PDP.</p>
   <label for="em">Email</label><input id="em" type="email" autocomplete="username">
   <label for="pw">Kata sandi</label><input id="pw" type="password" autocomplete="current-password">
@@ -108,11 +155,11 @@ function loginView() {
 // Tampil saat data gagal dimuat (mis. tidak ada internet). Pengguna TETAP login, cukup coba lagi.
 function gagalView(pesan) {
   $("#app").innerHTML = `<div class="card"><h1>Tidak bisa memuat data</h1><p class="bad">${esc(pesan)}</p><p class="mut">Anda tetap masuk. Periksa koneksi internet lalu coba lagi.</p>
-  <div class="row"><button id="ulang">Coba lagi</button><button class="alt" id="out2">Keluar</button></div></div>`;
-  $("#ulang").onclick = async () => { const { data } = await sb.auth.getSession(); data.session ? masuk(data.session.user) : loginView(); };
+  <div class="row"><button id="ulang">Coba lagi</button><button class="alt" id="out2">${LBL_KELUAR}</button></div></div>`;
+  $("#ulang").onclick = async () => { const ss = await sesi(); ss ? masuk(ss.user) : loginView(); };
   $("#out2").onclick = keluar;
 }
-async function keluar() { keluarManual = true; await sb.auth.signOut(); keluarManual = false; stop(); me = null; PROF = A = null; tab = "presensi"; depth = 0; history.replaceState({ d: 0, t: "presensi" }, ""); loginView(); }
+async function keluar() { if (SSO) { stop(); me = null; return kePdp(false); } keluarManual = true; await sb.auth.signOut(); keluarManual = false; stop(); me = null; PROF = A = null; tab = "presensi"; depth = 0; history.replaceState({ d: 0, t: "presensi" }, ""); loginView(); }
 async function masuk(user) {
   const { data, error: pe } = await sb.from("profiles").select("id,nama,email,role,kode_mesin,nip").eq("id", user.id).maybeSingle();
   if (pe) return gagalView("Gagal membaca profil e-Rapor: " + pe.message);
@@ -126,7 +173,7 @@ async function masuk(user) {
 function shell() {
   const tabs = [["presensi", "Presensi"], ["riwayat", "Riwayat"]];
   if (me.role === "admin") tabs.push(["rekap", "Rekap"], ["lokasi", "Lokasi"], ["jadwal", "Input jadwal"], ["cek", "Cek jadwal"], ["atur", "Pengaturan"], ["daftar", "Pegawai"]);
-  $("#app").innerHTML = `<div class="row"><div><h1>${esc(me.nama)}</h1><div class="mut">${esc(me.jabatan)}</div></div><div style="flex:none"><button class="alt" id="out">Keluar</button></div></div>
+  $("#app").innerHTML = `<div class="row"><div><h1>${esc(me.nama)}</h1><div class="mut">${esc(me.jabatan)}</div></div><div style="flex:none"><button class="alt" id="out">${LBL_KELUAR}</button></div></div>
   <div class="tabs">${tabs.map(t => `<button class="${t[0] === tab ? "" : "alt"}" data-t="${t[0]}">${t[1]}</button>`).join("")}</div><div id="view"></div>`;
   $("#out").onclick = keluar;
   document.querySelectorAll("[data-t]").forEach(b => b.onclick = () => goTab(b.dataset.t));

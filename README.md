@@ -29,6 +29,13 @@ cd android && ./gradlew assembleDebug
 Edit `index.html` di root, lalu `npm run sync`. Folder `www/` dibuat otomatis (jangan diedit).
 Ganti `appId` / nama di `capacitor.config.json` bila perlu (ID paket lama dan baru dianggap aplikasi berbeda).
 
+## Masuk otomatis dari PDP
+Presensi bisa dibuka dari Menu Utama PDP tanpa login ulang. PDP membuka `index.html` dengan
+`#sso=<token sesi PDP>&from=<alamat portal PDP>`; token dipakai langsung (tidak disimpan permanen,
+tidak diperbarui di sini) dan dihapus dari alamat. Bila token habis, tombol **Perbarui dari PDP**
+mengarahkan ke portal (`?buka=presensi`) yang lalu membuka Presensi lagi dengan token baru.
+Tanpa `#sso=` (APK / buka langsung) tetap login email + kata sandi. Edge Function `presensi-api` tidak berubah.
+
 ## Database & jadwal
 - Data presensi (lokasi, jadwal, pengaturan, log, foto) ada di project Supabase `nrwexyezcbmsokelgkmp`; e-Rapor/PDP hanya dibaca (login + data pegawai).
 - Setup: jalankan `setup.sql` di project presensi, deploy `index.ts` sebagai Edge Function `presensi-api` (Verify JWT: OFF, secret `RAPOR_URL` dan `RAPOR_ANON_KEY`).
